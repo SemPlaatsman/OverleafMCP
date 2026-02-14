@@ -1,10 +1,10 @@
 # Overleaf MCP Server
 
-An MCP (Model Context Protocol) server that provides access to Overleaf projects via Git integration. This allows Claude and other MCP clients to read LaTeX files, analyze document structure, and extract content from Overleaf projects.
+An MCP (Model Context Protocol) server that provides access to Overleaf projects via Git integration. This allows Claude and other MCP clients to read LaTeX files, analyze document structure, extract content, and write files from and to Overleaf projects.
 
 ## Features
 
-- 📄 **File Management**: List and read files from Overleaf projects
+- 📄 **File Management**: List, read, and write files from and to Overleaf projects
 - 📋 **Document Structure**: Parse LaTeX sections and subsections
 - 🔍 **Content Extraction**: Extract specific sections by title
 - 📊 **Project Summary**: Get overview of project status and structure
@@ -99,6 +99,21 @@ Get content of a specific section.
 Get a comprehensive project status summary.
 - `projectName`: Project identifier (optional)
 
+### `write_full`
+Write the full content of a file to the project.
+- `filePath`: Path to the file (required)
+- `content`: Content to write to the file (required)
+- `commitMessage`: Commit message (required)
+- `projectName`: Project identifier (optional)
+
+### `write_section`
+Write the content of a specific section to the project.
+- `filePath`: Path to the file (required)
+- `sectionTitle`: Title of the section (required)
+- `content`: Content to write to the section (required)
+- `commitMessage`: Commit message (required)
+- `projectName`: Project identifier (optional)
+
 ## Usage Examples
 
 ```
@@ -116,6 +131,12 @@ Use get_section_content with filePath: "main.tex" and sectionTitle: "Introductio
 
 # List all sections in a file
 Use get_sections with filePath: "main.tex"
+
+# Write the full content of a file to the project
+Use write_full with filePath: "main.tex", content: "...", commitMessage: "..."
+
+# Write the content of a specific section to the project
+Use write_section with filePath: "main.tex", sectionTitle: "Introduction", content: "...", commitMessage: "..."
 ```
 
 ## Multi-Project Usage
