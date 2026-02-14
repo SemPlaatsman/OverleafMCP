@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { spawn } from 'child_process';
-import { readFile, access, readdir } from 'fs/promises';
+import { readFile, writeFile, access, readdir } from 'fs/promises';
 import { promisify } from 'util';
 import { exec as execCallback } from 'child_process';
 import path from 'path';
@@ -115,6 +115,36 @@ class OverleafGitClient {
     const endIdx = nextSection ? nextSection.index : content.length;
 
     return content.substring(startIdx, endIdx);
+  }
+
+  async writeFile(filePath, content, commitMessage) {
+    try {
+      // Pull before writing to avoid conflicts with remote changes
+      await this.cloneOrPull();
+    } catch (err) {
+      if (err.message.includes('CONFLICT')) {
+        throw new Error(
+          `Merge conflict while pulling. Resolve the conflict in Overleaf, then retry.`
+        );
+      }
+      throw err;
+    }
+    const fullPath = path.join(this.repoPath, filePath);
+    await writeFile(fullPath, content, 'utf-8');
+    try {
+      const { stdout } = await exec(
+        `cd "${this.repoPath}" && git add "${filePath}" && git commit -m "${commitMessage}" && git push`,
+        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
+      );
+      return stdout;
+    } catch (err) {
+      if (err.message.includes('non-fast-forward') || err.message.includes('rejected')) {
+        throw new Error(
+          `Push rejected, remote has new changes. Retry to pull and re-apply your write.`
+        );
+      }
+      throw err;
+    }
   }
 }
 
@@ -240,6 +270,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'write_file',
+        description: 'Write content to a file in an Overleaf project and push to Overleaf',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            filePath: {
+              type: 'string',
+              description: 'Path to the file',
+            },
+            content: {
+              type: 'string',
+              description: 'Full file content to write',
+            },
+            commitMessage: {
+              type: 'string',
+              description: 'Git commit message',
+            },
+            projectName: {
+              type: 'string',
+              description: 'Project identifier (optional)',
+            },
+          },
+          required: ['filePath', 'content', 'commitMessage'],
+        },
+      },
     ],
   };
 });
@@ -338,6 +394,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 totalSections: sections.length,
                 files: files.slice(0, 10),
               }, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'write_file': {
+        const client = getProject(args.projectName);
+        const result = await client.writeFile(args.filePath, args.content, args.commitMessage);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: result || 'File written and pushed successfully.',
             },
           ],
         };
