@@ -7,7 +7,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { spawn } from 'child_process';
-import { readFile } from 'fs/promises';
+import { readFile, access, readdir } from 'fs/promises';
 import { promisify } from 'util';
 import { exec as execCallback } from 'child_process';
 import path from 'path';
@@ -42,17 +42,18 @@ class OverleafGitClient {
 
   async cloneOrPull() {
     try {
-      // Check if repo exists
-      await exec(`test -d "${this.repoPath}/.git"`);
-      // Pull latest changes
-      const { stdout } = await exec(`cd "${this.repoPath}" && git pull`, {
-        env: { ...process.env, GIT_ASKPASS: 'echo', GIT_PASSWORD: this.gitToken }
-      });
+      await access(path.join(this.repoPath, '.git'));
+      // .git folder exists, just pull
+      const { stdout } = await exec(
+        `cd "${this.repoPath}" && git pull`,
+        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
+      );
       return stdout;
     } catch {
-      // Clone repo - Overleaf requires format: https://git:TOKEN@git.overleaf.com/PROJECT_ID
+      // Not cloned yet, do initial clone
       const { stdout } = await exec(
-        `git clone https://git:${this.gitToken}@git.overleaf.com/${this.projectId} "${this.repoPath}"`
+        `git clone https://git:${this.gitToken}@git.overleaf.com/${this.projectId} "${this.repoPath}"`,
+        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
       );
       return stdout;
     }
@@ -60,13 +61,21 @@ class OverleafGitClient {
 
   async listFiles(extension = '.tex') {
     await this.cloneOrPull();
-    const { stdout } = await exec(
-      `find "${this.repoPath}" -name "*${extension}" -type f`
-    );
-    return stdout
-      .split('\n')
-      .filter(f => f)
-      .map(f => f.replace(this.repoPath + '/', ''));
+    // Recursive walk
+    const results = [];
+    const walk = async (dir) => {
+      const entries = await readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory() && entry.name !== '.git') {
+          await walk(fullPath);
+        } else if (entry.isFile() && (!extension || entry.name.endsWith(extension))) {
+          results.push(path.relative(this.repoPath, fullPath));
+        }
+      }
+    };
+    await walk(this.repoPath);
+    return results;
   }
 
   async readFile(filePath) {
@@ -80,7 +89,7 @@ class OverleafGitClient {
     const sections = [];
     const sectionRegex = /\\(?:section|subsection|subsubsection)\{([^}]+)\}/g;
     let match;
-    
+
     while ((match = sectionRegex.exec(content)) !== null) {
       sections.push({
         title: match[1],
@@ -88,23 +97,23 @@ class OverleafGitClient {
         index: match.index
       });
     }
-    
+
     return sections;
   }
 
   async getSectionContent(filePath, sectionTitle) {
     const content = await this.readFile(filePath);
     const sections = await this.getSections(filePath);
-    
+
     const targetSection = sections.find(s => s.title === sectionTitle);
     if (!targetSection) {
       throw new Error(`Section "${sectionTitle}" not found`);
     }
-    
+
     const nextSection = sections.find(s => s.index > targetSection.index);
     const startIdx = targetSection.index;
     const endIdx = nextSection ? nextSection.index : content.length;
-    
+
     return content.substring(startIdx, endIdx);
   }
 }
@@ -314,11 +323,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const files = await client.listFiles();
         const mainFile = files.find(f => f.includes('main.tex')) || files[0];
         let sections = [];
-        
+
         if (mainFile) {
           sections = await client.getSections(mainFile);
         }
-        
+
         return {
           content: [
             {
