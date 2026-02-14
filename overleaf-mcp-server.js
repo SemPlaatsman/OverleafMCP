@@ -117,6 +117,50 @@ class OverleafGitClient {
     return content.substring(startIdx, endIdx);
   }
 
+  async writeSection(filePath, sectionTitle, newContent, commitMessage) {
+    try {
+      await this.cloneOrPull();
+    } catch (err) {
+      if (err.message.includes('CONFLICT')) {
+        throw new Error(`Merge conflict while pulling. Resolve the conflict in Overleaf, then retry.`);
+      }
+      throw err;
+    }
+    const fullPath = path.join(this.repoPath, filePath);
+    const fileContent = await readFile(fullPath, 'utf-8');
+    const sections = await this.getSections(filePath);
+
+    const target = sections.find(s => s.title === sectionTitle);
+    if (!target) {
+      throw new Error(`Section "${sectionTitle}" not found`);
+    }
+
+    // Find where the next same-or-higher level section starts, or end of document
+    const sectionLevels = { section: 1, subsection: 2, subsubsection: 3 };
+    const targetLevel = sectionLevels[target.type] ?? 99;
+    const next = sections.find(s => s.index > target.index && (sectionLevels[s.type] ?? 99) <= targetLevel);
+    const endIdx = next ? next.index : fileContent.lastIndexOf('\\end{document}');
+
+    const updated =
+      fileContent.slice(0, target.index) +
+      newContent.trimEnd() + '\n\n' +
+      fileContent.slice(endIdx);
+
+    await writeFile(fullPath, updated, 'utf-8');
+    try {
+      const { stdout } = await exec(
+        `cd "${this.repoPath}" && git add "${filePath}" && git commit -m "${commitMessage}" && git push`,
+        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
+      );
+      return stdout;
+    } catch (err) {
+      if (err.message.includes('non-fast-forward') || err.message.includes('rejected')) {
+        throw new Error(`Push rejected, remote has new changes. Retry to pull and re-apply your write.`);
+      }
+      throw err;
+    }
+  }
+
   async writeFile(filePath, content, commitMessage) {
     try {
       // Pull before writing to avoid conflicts with remote changes
@@ -296,6 +340,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['filePath', 'content', 'commitMessage'],
         },
       },
+      {
+        name: 'write_section',
+        description: 'Replace a single section in a LaTeX file and push to Overleaf. Safer than write_file for targeted edits — only the named section is replaced, leaving the rest of the file untouched.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            filePath: {
+              type: 'string',
+              description: 'Path to the LaTeX file',
+            },
+            sectionTitle: {
+              type: 'string',
+              description: 'Title of the section to replace (must match exactly)',
+            },
+            newContent: {
+              type: 'string',
+              description: 'Full replacement content for the section, including the section heading',
+            },
+            commitMessage: {
+              type: 'string',
+              description: 'Git commit message',
+            },
+            projectName: {
+              type: 'string',
+              description: 'Project identifier (optional)',
+            },
+          },
+          required: ['filePath', 'sectionTitle', 'newContent', 'commitMessage'],
+        },
+      },
     ],
   };
 });
@@ -407,6 +481,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: result || 'File written and pushed successfully.',
+            },
+          ],
+        };
+      }
+
+      case 'write_section': {
+        const client = getProject(args.projectName);
+        const result = await client.writeSection(
+          args.filePath,
+          args.sectionTitle,
+          args.newContent,
+          args.commitMessage
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: result || 'Section written and pushed successfully.',
             },
           ],
         };
