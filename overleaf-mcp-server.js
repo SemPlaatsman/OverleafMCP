@@ -449,34 +449,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'sync_zotero_bibliography',
-        description: 'Fetch the full BibTeX export from a Zotero library via the Zotero API and write it to a .bib file in the Overleaf project, then push. This is the equivalent of clicking the Refresh button in Overleaf but fully automated. Always call this after adding papers to Zotero so the .bib file is up to date before writing citations.',
+        description: 'Fetch the full BibTeX export from a Zotero library via the Zotero API and write it to a .bib file in the Overleaf project, then push. All Zotero credentials and config are read from projects.json. This is the equivalent of clicking the Refresh button in Overleaf but fully automated. Always call this after adding papers to Zotero so the .bib file is up to date before writing citations.',
         inputSchema: {
           type: 'object',
           properties: {
-            bibFilePath: {
+            projectName: {
               type: 'string',
-              description: 'Path to the .bib file in the project (e.g. "references.bib")',
-            },
-            zoteroApiKey: {
-              type: 'string',
-              description: 'Zotero private API key with read access to the library',
-            },
-            zoteroLibraryType: {
-              type: 'string',
-              enum: ['user', 'group'],
-              description: '"user" for My Library, "group" for a Group Library',
-            },
-            zoteroLibraryId: {
-              type: 'string',
-              description: 'Numeric Zotero library ID — user ID for personal library, group ID for group libraries',
+              description: 'Project identifier (optional, defaults to "default")',
             },
             commitMessage: {
               type: 'string',
               description: 'Git commit message (optional, defaults to "Sync bibliography from Zotero")',
-            },
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
             },
           },
           required: [],
@@ -620,21 +603,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const client = getProject(args.projectName);
         const config = getProjectConfig(args.projectName);
 
-        // Fall back to projects.json zotero block if args not supplied explicitly
-        const zotero = config.zotero || {};
-        const apiKey = args.zoteroApiKey || zotero.apiKey;
-        const libraryType = args.zoteroLibraryType || zotero.libraryType;
-        const libraryId = args.zoteroLibraryId || zotero.libraryId;
-        const bibFilePath = args.bibFilePath || zotero.bibFile;
+        // All Zotero config must come from projects.json
+        const zotero = config.zotero;
+        if (!zotero) {
+          throw new Error('No zotero config found in projects.json for this project. Add a "zotero" block with apiKey, libraryType, libraryId, and bibFile.');
+        }
+
+        const { apiKey, libraryType, libraryId, bibFile } = zotero;
         const commitMessage = args.commitMessage || 'Sync bibliography from Zotero';
 
-        if (!apiKey) throw new Error('Zotero API key not found. Add it to projects.json under zotero.apiKey or pass it as zoteroApiKey.');
-        if (!libraryType) throw new Error('Zotero library type not found. Add it to projects.json under zotero.libraryType or pass it as zoteroLibraryType.');
-        if (!libraryId) throw new Error('Zotero library ID not found. Add it to projects.json under zotero.libraryId or pass it as zoteroLibraryId.');
-        if (!bibFilePath) throw new Error('Bib file path not found. Add it to projects.json under zotero.bibFile or pass it as bibFilePath.');
+        if (!apiKey) throw new Error('Zotero API key not found in projects.json under zotero.apiKey');
+        if (!libraryType) throw new Error('Zotero library type not found in projects.json under zotero.libraryType');
+        if (!libraryId) throw new Error('Zotero library ID not found in projects.json under zotero.libraryId');
+        if (!bibFile) throw new Error('Bib file path not found in projects.json under zotero.bibFile');
 
         const result = await client.syncZoteroBibliography(
-          bibFilePath,
+          bibFile,
           apiKey,
           libraryType,
           libraryId,
