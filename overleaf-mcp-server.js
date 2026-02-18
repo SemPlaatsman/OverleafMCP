@@ -191,73 +191,6 @@ class OverleafGitClient {
     }
   }
 
-  async fetchZoteroBibtex(apiKey, libraryType, libraryId) {
-    // Zotero API returns max 100 items per request — paginate until all collected
-    const baseUrl = `https://api.zotero.org/${libraryType}s/${libraryId}/items`;
-    const headers = {
-      'Zotero-API-Key': apiKey,
-      'Zotero-API-Version': '3',
-    };
-
-    let allBibtex = '';
-    let start = 0;
-    const limit = 100;
-    let totalResults = null;
-
-    do {
-      const url = `${baseUrl}?format=bibtex&limit=${limit}&start=${start}`;
-      const response = await fetch(url, { headers });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Zotero API error ${response.status}: ${body}`);
-      }
-
-      // First request: read total from header so we know how many pages to fetch
-      if (totalResults === null) {
-        totalResults = parseInt(response.headers.get('Total-Results') || '0', 10);
-      }
-
-      const chunk = await response.text();
-      allBibtex += chunk;
-      start += limit;
-    } while (start < totalResults);
-
-    return allBibtex;
-  }
-
-  async syncZoteroBibliography(bibFilePath, apiKey, libraryType, libraryId, commitMessage) {
-    try {
-      await this.cloneOrPull();
-    } catch (err) {
-      if (err.message.includes('CONFLICT')) {
-        throw new Error(`Merge conflict while pulling. Resolve the conflict in Overleaf, then retry.`);
-      }
-      throw err;
-    }
-
-    const bibtex = await this.fetchZoteroBibtex(apiKey, libraryType, libraryId);
-
-    if (!bibtex.trim()) {
-      throw new Error('Zotero returned an empty bibliography. Check that the library has items and the API key has read access.');
-    }
-
-    const fullPath = path.join(this.repoPath, bibFilePath);
-    await writeFile(fullPath, bibtex, 'utf-8');
-
-    try {
-      const { stdout } = await exec(
-        `cd "${this.repoPath}" && git add "${bibFilePath}" && git diff --cached --quiet || git commit -m "${commitMessage}" && git push`,
-        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
-      );
-      return stdout;
-    } catch (err) {
-      if (err.message.includes('non-fast-forward') || err.message.includes('rejected')) {
-        throw new Error(`Push rejected, remote has new changes. Retry to pull and re-apply.`);
-      }
-      throw err;
-    }
-  }
 }
 
 // Create MCP server
@@ -280,15 +213,6 @@ function getProject(projectName = 'default') {
     throw new Error(`Project "${projectName}" not found in configuration`);
   }
   return new OverleafGitClient(project.projectId, project.gitToken);
-}
-
-// Helper to get the raw project config entry (for zotero credentials etc.)
-function getProjectConfig(projectName = 'default') {
-  const project = projectsConfig.projects[projectName];
-  if (!project) {
-    throw new Error(`Project "${projectName}" not found in configuration`);
-  }
-  return project;
 }
 
 // List all projects
@@ -447,24 +371,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['filePath', 'sectionTitle', 'newContent', 'commitMessage'],
         },
       },
-      {
-        name: 'sync_zotero_bibliography',
-        description: 'Fetch the full BibTeX export from a Zotero library via the Zotero API and write it to a .bib file in the Overleaf project, then push. All Zotero credentials and config are read from projects.json. This is the equivalent of clicking the Refresh button in Overleaf but fully automated. Always call this after adding papers to Zotero so the .bib file is up to date before writing citations.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional, defaults to "default")',
-            },
-            commitMessage: {
-              type: 'string',
-              description: 'Git commit message (optional, defaults to "Sync bibliography from Zotero")',
-            },
-          },
-          required: [],
-        },
-      },
     ],
   };
 });
@@ -594,41 +500,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: result || 'Section written and pushed successfully.',
-            },
-          ],
-        };
-      }
-
-      case 'sync_zotero_bibliography': {
-        const client = getProject(args.projectName);
-        const config = getProjectConfig(args.projectName);
-
-        // All Zotero config must come from projects.json
-        const zotero = config.zotero;
-        if (!zotero) {
-          throw new Error('No zotero config found in projects.json for this project. Add a "zotero" block with apiKey, libraryType, libraryId, and bibFile.');
-        }
-
-        const { apiKey, libraryType, libraryId, bibFile } = zotero;
-        const commitMessage = args.commitMessage || 'Sync bibliography from Zotero';
-
-        if (!apiKey) throw new Error('Zotero API key not found in projects.json under zotero.apiKey');
-        if (!libraryType) throw new Error('Zotero library type not found in projects.json under zotero.libraryType');
-        if (!libraryId) throw new Error('Zotero library ID not found in projects.json under zotero.libraryId');
-        if (!bibFile) throw new Error('Bib file path not found in projects.json under zotero.bibFile');
-
-        const result = await client.syncZoteroBibliography(
-          bibFile,
-          apiKey,
-          libraryType,
-          libraryId,
-          commitMessage
-        );
-        return {
-          content: [
-            {
-              type: 'text',
-              text: result || 'Bibliography synced from Zotero and pushed to Overleaf successfully.',
             },
           ],
         };
