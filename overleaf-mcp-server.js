@@ -64,6 +64,10 @@ function getProject(projectName) {
   const projects = projectsConfig.projects ?? {};
   const keys = Object.keys(projects);
 
+  if (keys.length === 0) {
+    throw new Error('No projects configured. Add at least one entry to projects.json.');
+  }
+
   if (!projectName) {
     if (keys.length === 1) {
       // Exactly one project configured: safe to default without ambiguity.
@@ -88,6 +92,7 @@ function getProject(projectName) {
   return {
     client: new OverleafGitClient(project.projectId, project.gitToken, TEMP_DIR),
     projectId: project.projectId,
+    resolvedName: projectName,
     // readOnly defaults to false — omitting the field means the project is writable.
     readOnly: project.readOnly === true,
   };
@@ -164,9 +169,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'get_sections',
       description:
-        'Get all sections from a .tex file as a flat list. Each entry includes its type ' +
-        '(section, subsection, etc.), title, character offset, full content, and a short ' +
-        'content preview. Only applicable to .tex files.',
+        'Get all sections from a .tex file as a hierarchical tree. Each node includes ' +
+        'its type (section, subsection, etc.), title, character offset, the text content ' +
+        'immediately following that heading (not including children), a 100-character ' +
+        'preview, and a children array of nested sections. Use this for document structure ' +
+        'overview and to identify which section to read or edit next. ' +
+        'Only applicable to .tex files.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -176,7 +184,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           projectName: {
             type: 'string',
-            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
           },
         },
         required: ['filePath'],
@@ -187,7 +195,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'get_section_content',
       description:
         'Get the full content of a specific section in a .tex file. ' +
-        'Only applicable to .tex files.',
+        'If the same section title appears under multiple parent sections, supply ' +
+        'parentTitle to disambiguate. Only applicable to .tex files.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -199,12 +208,136 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Title of the section (must match exactly)',
           },
+          parentTitle: {
+            type: 'string',
+            description:
+              'Title of the parent section, used to disambiguate when the same ' +
+              'sectionTitle appears under multiple parents (optional)',
+          },
           projectName: {
             type: 'string',
-            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
           },
         },
         required: ['filePath', 'sectionTitle'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'get_preamble',
+      description:
+        'Get everything before the first sectioning command in a .tex file: ' +
+        'the document class declaration, package imports, and custom command definitions. ' +
+        'Returns the full file content if the file contains no sections. ' +
+        'Only applicable to .tex files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the LaTeX file',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'get_postamble',
+      description:
+        'Get everything from \\end{document} (inclusive) to the end of the file. ' +
+        'Returns an empty string if \\end{document} is absent (e.g. \\input\'d files). ' +
+        'Note: bibliography commands (\\bibliography{}, \\bibliographystyle{}, ' +
+        '\\printbibliography) appear before \\end{document} and are part of the last ' +
+        "section's content range — use str_replace to edit them. " +
+        'Only applicable to .tex files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the LaTeX file',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'list_history',
+      description:
+        'Show recent git commits for the project, optionally filtered by file path ' +
+        'and/or time range. Each entry includes the commit hash, date, author, and subject.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'integer',
+            description: 'Maximum number of commits to return (optional, default 20, max 200)',
+          },
+          filePath: {
+            type: 'string',
+            description: 'Restrict history to a specific file path (optional)',
+          },
+          since: {
+            type: 'string',
+            description: 'git --since filter, e.g. "2.weeks" or "2025-01-01" (optional)',
+          },
+          until: {
+            type: 'string',
+            description: 'git --until filter (optional)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'get_diff',
+      description:
+        'Get a unified diff for the project. By default returns all changes since the ' +
+        'last commit (working tree vs HEAD). Supply fromRef and/or toRef to diff between ' +
+        'specific commits or branches.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          fromRef: {
+            type: 'string',
+            description: 'Base ref (commit hash, branch, or tag). Omit to diff working tree vs HEAD (optional)',
+          },
+          toRef: {
+            type: 'string',
+            description: 'Target ref. Omit to use the working tree (optional)',
+          },
+          filePaths: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Restrict the diff to these file paths (optional)',
+          },
+          contextLines: {
+            type: 'integer',
+            description: 'Lines of context around each hunk (optional, default 3, max 10)',
+          },
+          maxOutputChars: {
+            type: 'integer',
+            description: 'Truncate output to this many characters (optional, default 120000)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -327,13 +460,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     // All other tools require a project context.
-    const { client, projectId, readOnly } = getProject(args.projectName);
+    const { client, projectId, resolvedName, readOnly } = getProject(args.projectName);
 
     // Central read-only guard: checked once here, applies to every write tool
     // automatically as new ones are added to the WRITE_TOOLS registry above.
     if (WRITE_TOOLS.has(name) && readOnly) {
       throw new Error(
-        `Project "${args.projectName ?? '<none specified>'}" is configured as read-only. ` +
+        `Project "${resolvedName}" is configured as read-only. ` +
         `Set "readOnly": false in projects.json to enable write operations.`
       );
     }
@@ -355,20 +488,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_sections': {
-        const sections = await withProjectLock(projectId, () =>
-          client.getSections(args.filePath)
+        const tree = await withProjectLock(projectId, () =>
+          client.getSectionTree(args.filePath)
         );
-        return text(JSON.stringify(sections, null, 2));
+        return text(JSON.stringify(tree, null, 2));
       }
 
       case 'get_section_content': {
         const section = await withProjectLock(projectId, () =>
-          client.getSection(args.filePath, args.sectionTitle)
+          client.getSection(args.filePath, args.sectionTitle, args.parentTitle ?? null)
         );
         if (!section) {
-          throw new Error(`Section "${args.sectionTitle}" not found in "${args.filePath}"`);
+          const hint = args.parentTitle
+            ? ` under parent "${args.parentTitle}"`
+            : ' (consider supplying parentTitle if the title appears under multiple sections)';
+          throw new Error(`Section "${args.sectionTitle}" not found in "${args.filePath}"${hint}`);
         }
         return text(section.content);
+      }
+
+      case 'get_preamble': {
+        const preamble = await withProjectLock(projectId, () =>
+          client.getPreamble(args.filePath)
+        );
+        return text(preamble);
+      }
+
+      case 'get_postamble': {
+        const postamble = await withProjectLock(projectId, () =>
+          client.getPostamble(args.filePath)
+        );
+        return text(postamble || '(no \\end{document} found in this file)');
+      }
+
+      case 'list_history': {
+        const entries = await withProjectLock(projectId, () =>
+          client.listHistory({
+            limit: args.limit,
+            filePath: args.filePath,
+            since: args.since,
+            until: args.until,
+          })
+        );
+        if (!entries.length) return text('No commits found for the given filters.');
+        const lines = entries.map(
+          (e, i) => `${i + 1}. ${e.hash.slice(0, 8)} | ${e.date} | ${e.author} | ${e.subject}`
+        );
+        return text(lines.join('\n'));
+      }
+
+      case 'get_diff': {
+        const { diff, truncated } = await withProjectLock(projectId, () =>
+          client.getDiff({
+            fromRef: args.fromRef,
+            toRef: args.toRef,
+            filePaths: args.filePaths ?? [],
+            contextLines: args.contextLines,
+            maxOutputChars: args.maxOutputChars,
+          })
+        );
+        const header = [
+          `Base:   ${args.fromRef ?? 'HEAD'}`,
+          `Target: ${args.toRef ?? 'working tree'}`,
+          args.filePaths?.length ? `Paths: ${args.filePaths.join(', ')}` : 'Paths: all',
+          truncated ? '(output truncated)' : null,
+        ].filter(Boolean).join('\n');
+        return text(`${header}\n\n${diff || '(no differences)'}`);
       }
 
       case 'status_summary': {
