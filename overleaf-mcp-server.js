@@ -6,529 +6,439 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { spawn } from 'child_process';
-import { readFile, writeFile, access, readdir } from 'fs/promises';
-import { promisify } from 'util';
-import { exec as execCallback } from 'child_process';
+import { readFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import os from 'os';
+
+import { OverleafGitClient } from './overleaf-git-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const exec = promisify(execCallback);
+// ─── Configuration ────────────────────────────────────────────────────────────
 
-// Load projects configuration
+const PROJECTS_FILE = process.env.PROJECTS_FILE
+  ? path.resolve(process.cwd(), process.env.PROJECTS_FILE)
+  : path.join(__dirname, 'projects.json');
+
+const TEMP_DIR = process.env.OVERLEAF_TEMP_DIR
+  ? path.resolve(process.cwd(), process.env.OVERLEAF_TEMP_DIR)
+  : path.join(__dirname, 'temp');
+
 let projectsConfig;
 try {
-  const configPath = path.join(__dirname, 'projects.json');
-  const configData = await readFile(configPath, 'utf-8');
-  projectsConfig = JSON.parse(configData);
-} catch (error) {
-  console.error('Error loading projects.json:', error.message);
-  console.error('Please create projects.json from projects.example.json');
+  const raw = await readFile(PROJECTS_FILE, 'utf-8');
+  projectsConfig = JSON.parse(raw);
+} catch (err) {
+  console.error(`[OverleafMCP] Failed to load projects config from "${PROJECTS_FILE}": ${err.message}`);
+  console.error('[OverleafMCP] Please create projects.json from projects.example.json');
   process.exit(1);
 }
 
-// Git operations helper
-class OverleafGitClient {
-  constructor(projectId, gitToken) {
-    this.projectId = projectId;
-    this.gitToken = gitToken;
-    this.repoPath = path.join(os.tmpdir(), `overleaf-${projectId}`);
-    this.gitUrl = `https://git.overleaf.com/${projectId}`;
+// ─── In-process per-project mutex ────────────────────────────────────────────
+//
+// Serializes all git operations for a given project within this process.
+// Prevents concurrent pull → write → push cycles from corrupting the local repo.
+//
+// Each entry in the map is the tail promise of that project's operation chain.
+// A new caller appends itself to the tail and waits for the previous to finish.
+//
+const _projectLocks = new Map();
+
+async function withProjectLock(projectId, fn) {
+  const previous = _projectLocks.get(projectId) ?? Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  _projectLocks.set(projectId, previous.then(() => current));
+  try {
+    await previous;
+    return await fn();
+  } finally {
+    release();
   }
-
-  async cloneOrPull() {
-    try {
-      await access(path.join(this.repoPath, '.git'));
-      // .git folder exists, just pull
-      const { stdout } = await exec(
-        `cd "${this.repoPath}" && git pull`,
-        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
-      );
-      return stdout;
-    } catch {
-      // Not cloned yet, do initial clone
-      const { stdout } = await exec(
-        `git clone https://git:${this.gitToken}@git.overleaf.com/${this.projectId} "${this.repoPath}"`,
-        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
-      );
-      return stdout;
-    }
-  }
-
-  async listFiles(extension = '.tex') {
-    await this.cloneOrPull();
-    // Recursive walk
-    const results = [];
-    const walk = async (dir) => {
-      const entries = await readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory() && entry.name !== '.git') {
-          await walk(fullPath);
-        } else if (entry.isFile() && (!extension || entry.name.endsWith(extension))) {
-          results.push(path.relative(this.repoPath, fullPath));
-        }
-      }
-    };
-    await walk(this.repoPath);
-    return results;
-  }
-
-  async readFile(filePath) {
-    await this.cloneOrPull();
-    const fullPath = path.join(this.repoPath, filePath);
-    return await readFile(fullPath, 'utf-8');
-  }
-
-  async getSections(filePath) {
-    const content = await this.readFile(filePath);
-    const sections = [];
-    const sectionRegex = /\\(?:section|subsection|subsubsection)\{([^}]+)\}/g;
-    let match;
-
-    while ((match = sectionRegex.exec(content)) !== null) {
-      sections.push({
-        title: match[1],
-        type: match[0].split('{')[0].replace('\\', ''),
-        index: match.index
-      });
-    }
-
-    return sections;
-  }
-
-  async getSectionContent(filePath, sectionTitle) {
-    const content = await this.readFile(filePath);
-    const sections = await this.getSections(filePath);
-
-    const targetSection = sections.find(s => s.title === sectionTitle);
-    if (!targetSection) {
-      throw new Error(`Section "${sectionTitle}" not found`);
-    }
-
-    const nextSection = sections.find(s => s.index > targetSection.index);
-    const startIdx = targetSection.index;
-    const endIdx = nextSection ? nextSection.index : content.length;
-
-    return content.substring(startIdx, endIdx);
-  }
-
-  async writeSection(filePath, sectionTitle, newContent, commitMessage) {
-    try {
-      await this.cloneOrPull();
-    } catch (err) {
-      if (err.message.includes('CONFLICT')) {
-        throw new Error(`Merge conflict while pulling. Resolve the conflict in Overleaf, then retry.`);
-      }
-      throw err;
-    }
-    const fullPath = path.join(this.repoPath, filePath);
-    const fileContent = await readFile(fullPath, 'utf-8');
-    const sections = await this.getSections(filePath);
-
-    const target = sections.find(s => s.title === sectionTitle);
-    if (!target) {
-      throw new Error(`Section "${sectionTitle}" not found`);
-    }
-
-    // Find where the next same-or-higher level section starts, or end of document
-    const sectionLevels = { section: 1, subsection: 2, subsubsection: 3 };
-    const targetLevel = sectionLevels[target.type] ?? 99;
-    const next = sections.find(s => s.index > target.index && (sectionLevels[s.type] ?? 99) <= targetLevel);
-    const endIdx = next ? next.index : fileContent.lastIndexOf('\\end{document}');
-
-    const updated =
-      fileContent.slice(0, target.index) +
-      newContent.trimEnd() + '\n\n' +
-      fileContent.slice(endIdx);
-
-    await writeFile(fullPath, updated, 'utf-8');
-    try {
-      const { stdout } = await exec(
-        `cd "${this.repoPath}" && git add "${filePath}" && git commit -m "${commitMessage}" && git push`,
-        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
-      );
-      return stdout;
-    } catch (err) {
-      if (err.message.includes('non-fast-forward') || err.message.includes('rejected')) {
-        throw new Error(`Push rejected, remote has new changes. Retry to pull and re-apply your write.`);
-      }
-      throw err;
-    }
-  }
-
-  async writeFile(filePath, content, commitMessage) {
-    try {
-      // Pull before writing to avoid conflicts with remote changes
-      await this.cloneOrPull();
-    } catch (err) {
-      if (err.message.includes('CONFLICT')) {
-        throw new Error(
-          `Merge conflict while pulling. Resolve the conflict in Overleaf, then retry.`
-        );
-      }
-      throw err;
-    }
-    const fullPath = path.join(this.repoPath, filePath);
-    await writeFile(fullPath, content, 'utf-8');
-    try {
-      const { stdout } = await exec(
-        `cd "${this.repoPath}" && git add "${filePath}" && git commit -m "${commitMessage}" && git push`,
-        { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }
-      );
-      return stdout;
-    } catch (err) {
-      if (err.message.includes('non-fast-forward') || err.message.includes('rejected')) {
-        throw new Error(
-          `Push rejected, remote has new changes. Retry to pull and re-apply your write.`
-        );
-      }
-      throw err;
-    }
-  }
-
 }
 
-// Create MCP server
-const server = new Server(
-  {
-    name: 'overleaf-mcp-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
+// ─── Project resolution ───────────────────────────────────────────────────────
+
+function getProject(projectName) {
+  const projects = projectsConfig.projects ?? {};
+  const keys = Object.keys(projects);
+
+  if (!projectName) {
+    if (keys.length === 1) {
+      // Exactly one project configured: safe to default without ambiguity.
+      projectName = keys[0];
+    } else {
+      // Multiple projects: require an explicit selection to avoid silently
+      // operating on the wrong project.
+      throw new Error(
+        `projectName is required when multiple projects are configured. ` +
+        `Available projects: ${keys.join(', ')}`
+      );
+    }
   }
+
+  const project = projects[projectName];
+  if (!project) {
+    throw new Error(
+      `Project "${projectName}" not found. Available projects: ${keys.join(', ')}`
+    );
+  }
+
+  return {
+    client: new OverleafGitClient(project.projectId, project.gitToken, TEMP_DIR),
+    projectId: project.projectId,
+    // readOnly defaults to false — omitting the field means the project is writable.
+    readOnly: project.readOnly === true,
+  };
+}
+
+// ─── Write-tool registry ──────────────────────────────────────────────────────
+//
+// All tools that perform any write operation must be listed here.
+// The read-only guard checks this set centrally before the switch runs,
+// so adding a new write tool in a future branch only requires adding its name here.
+//
+const WRITE_TOOLS = new Set([
+  'write_file',
+  'write_section',
+]);
+
+// ─── MCP server ───────────────────────────────────────────────────────────────
+
+const server = new Server(
+  { name: 'overleaf-mcp-server', version: '1.0.0' },
+  { capabilities: { tools: {} } }
 );
 
-// Helper to get project
-function getProject(projectName = 'default') {
-  const project = projectsConfig.projects[projectName];
-  if (!project) {
-    throw new Error(`Project "${projectName}" not found in configuration`);
-  }
-  return new OverleafGitClient(project.projectId, project.gitToken);
-}
+// ─── Tool definitions ─────────────────────────────────────────────────────────
 
-// List all projects
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: 'list_projects',
-        description: 'List all configured Overleaf projects',
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'list_projects',
+      description: 'List all configured Overleaf projects',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
       },
-      {
-        name: 'list_files',
-        description: 'List files in an Overleaf project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional, defaults to "default")',
-            },
-            extension: {
-              type: 'string',
-              description: 'File extension filter (optional, e.g., ".tex")',
-            },
+    },
+    {
+      name: 'list_files',
+      description: 'List files in an Overleaf project',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+          },
+          extension: {
+            type: 'string',
+            description: 'File extension filter (optional, e.g. ".tex"). Defaults to ".tex"',
           },
         },
+        additionalProperties: false,
       },
-      {
-        name: 'read_file',
-        description: 'Read a file from an Overleaf project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            filePath: {
-              type: 'string',
-              description: 'Path to the file',
-            },
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
-            },
+    },
+    {
+      name: 'read_file',
+      description: 'Read a file from an Overleaf project',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the file',
           },
-          required: ['filePath'],
-        },
-      },
-      {
-        name: 'get_sections',
-        description: 'Get all sections from a LaTeX file',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            filePath: {
-              type: 'string',
-              description: 'Path to the LaTeX file',
-            },
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
-            },
-          },
-          required: ['filePath'],
-        },
-      },
-      {
-        name: 'get_section_content',
-        description: 'Get content of a specific section',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            filePath: {
-              type: 'string',
-              description: 'Path to the LaTeX file',
-            },
-            sectionTitle: {
-              type: 'string',
-              description: 'Title of the section',
-            },
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
-            },
-          },
-          required: ['filePath', 'sectionTitle'],
-        },
-      },
-      {
-        name: 'status_summary',
-        description: 'Get a comprehensive project status summary',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
-            },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
           },
         },
+        required: ['filePath'],
+        additionalProperties: false,
       },
-      {
-        name: 'write_file',
-        description: 'Write content to a file in an Overleaf project and push to Overleaf',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            filePath: {
-              type: 'string',
-              description: 'Path to the file',
-            },
-            content: {
-              type: 'string',
-              description: 'Full file content to write',
-            },
-            commitMessage: {
-              type: 'string',
-              description: 'Git commit message',
-            },
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
-            },
+    },
+    {
+      name: 'get_sections',
+      description:
+        'Get all sections from a .tex file as a flat list. Each entry includes its type ' +
+        '(section, subsection, etc.), title, character offset, full content, and a short ' +
+        'content preview. Only applicable to .tex files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the LaTeX file',
           },
-          required: ['filePath', 'content', 'commitMessage'],
-        },
-      },
-      {
-        name: 'write_section',
-        description: 'Replace a single section in a LaTeX file and push to Overleaf. Safer than write_file for targeted edits — only the named section is replaced, leaving the rest of the file untouched.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            filePath: {
-              type: 'string',
-              description: 'Path to the LaTeX file',
-            },
-            sectionTitle: {
-              type: 'string',
-              description: 'Title of the section to replace (must match exactly)',
-            },
-            newContent: {
-              type: 'string',
-              description: 'Full replacement content for the section, including the section heading',
-            },
-            commitMessage: {
-              type: 'string',
-              description: 'Git commit message',
-            },
-            projectName: {
-              type: 'string',
-              description: 'Project identifier (optional)',
-            },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
           },
-          required: ['filePath', 'sectionTitle', 'newContent', 'commitMessage'],
         },
+        required: ['filePath'],
+        additionalProperties: false,
       },
-    ],
-  };
-});
+    },
+    {
+      name: 'get_section_content',
+      description:
+        'Get the full content of a specific section in a .tex file. ' +
+        'Only applicable to .tex files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the LaTeX file',
+          },
+          sectionTitle: {
+            type: 'string',
+            description: 'Title of the section (must match exactly)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'sectionTitle'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'status_summary',
+      description: 'Get a high-level status summary of an Overleaf project',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'write_file',
+      description:
+        'Overwrite an entire file in an Overleaf project. ' +
+        'Prefer write_section or (once available) str_replace for targeted edits. ' +
+        'Use this for new file creation or full-file replacements only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the file',
+          },
+          content: {
+            type: 'string',
+            description: 'Full file content to write',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Update via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description:
+              'If true, report existing and new file sizes without writing anything ' +
+              '(optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'content'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'write_section',
+      description:
+        'Replace a single named section in a .tex file and optionally push to Overleaf. ' +
+        'Only the named section is replaced; the rest of the file is untouched. ' +
+        'The boundary is level-aware: the section ends where the next command of equal or ' +
+        'higher level begins, or at \\end{document} if there is none. ' +
+        'Only applicable to .tex files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the LaTeX file',
+          },
+          sectionTitle: {
+            type: 'string',
+            description: 'Title of the section to replace (must match exactly)',
+          },
+          newContent: {
+            type: 'string',
+            description: 'Replacement content for the section, including the section heading',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Update section via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, verify the section exists and return its size without writing anything',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; optional when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'sectionTitle', 'newContent'],
+        additionalProperties: false,
+      },
+    },
+  ],
+}));
 
-// Handle tool calls
+// ─── Tool handlers ────────────────────────────────────────────────────────────
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args = {} } = request.params;
+
   try {
-    const { name, arguments: args } = request.params;
+    // list_projects reads only in-memory config — no client or lock needed.
+    if (name === 'list_projects') {
+      const projects = Object.entries(projectsConfig.projects ?? {}).map(([key, p]) => ({
+        id: key,
+        name: p.name,
+        projectId: p.projectId,
+        readOnly: p.readOnly === true,
+      }));
+      return text(JSON.stringify(projects, null, 2));
+    }
+
+    // All other tools require a project context.
+    const { client, projectId, readOnly } = getProject(args.projectName);
+
+    // Central read-only guard: checked once here, applies to every write tool
+    // automatically as new ones are added to the WRITE_TOOLS registry above.
+    if (WRITE_TOOLS.has(name) && readOnly) {
+      throw new Error(
+        `Project "${args.projectName ?? '<none specified>'}" is configured as read-only. ` +
+        `Set "readOnly": false in projects.json to enable write operations.`
+      );
+    }
 
     switch (name) {
-      case 'list_projects': {
-        const projects = Object.entries(projectsConfig.projects).map(([key, project]) => ({
-          id: key,
-          name: project.name,
-          projectId: project.projectId,
-        }));
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(projects, null, 2),
-            },
-          ],
-        };
-      }
 
       case 'list_files': {
-        const client = getProject(args.projectName);
-        const files = await client.listFiles(args.extension || '.tex');
-        return {
-          content: [
-            {
-              type: 'text',
-              text: files.join('\n'),
-            },
-          ],
-        };
+        const files = await withProjectLock(projectId, () =>
+          client.listFiles(args.extension ?? '.tex')
+        );
+        return text(files.length ? files.join('\n') : 'No files found');
       }
 
       case 'read_file': {
-        const client = getProject(args.projectName);
-        const content = await client.readFile(args.filePath);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: content,
-            },
-          ],
-        };
+        const content = await withProjectLock(projectId, () =>
+          client.readFile(args.filePath)
+        );
+        return text(content);
       }
 
       case 'get_sections': {
-        const client = getProject(args.projectName);
-        const sections = await client.getSections(args.filePath);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(sections, null, 2),
-            },
-          ],
-        };
+        const sections = await withProjectLock(projectId, () =>
+          client.getSections(args.filePath)
+        );
+        return text(JSON.stringify(sections, null, 2));
       }
 
       case 'get_section_content': {
-        const client = getProject(args.projectName);
-        const content = await client.getSectionContent(args.filePath, args.sectionTitle);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: content,
-            },
-          ],
-        };
+        const section = await withProjectLock(projectId, () =>
+          client.getSection(args.filePath, args.sectionTitle)
+        );
+        if (!section) {
+          throw new Error(`Section "${args.sectionTitle}" not found in "${args.filePath}"`);
+        }
+        return text(section.content);
       }
 
       case 'status_summary': {
-        const client = getProject(args.projectName);
-        const files = await client.listFiles();
-        const mainFile = files.find(f => f.includes('main.tex')) || files[0];
-        let sections = [];
-
-        if (mainFile) {
-          sections = await client.getSections(mainFile);
-        }
-
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                totalFiles: files.length,
-                mainFile,
-                totalSections: sections.length,
-                files: files.slice(0, 10),
-              }, null, 2),
-            },
-          ],
-        };
+        const result = await withProjectLock(projectId, async () => {
+          const files = await client.listFiles();
+          const mainFile = files.find(f => f.includes('main.tex')) ?? files[0] ?? null;
+          const sections = mainFile ? await client.getSections(mainFile) : [];
+          return { totalFiles: files.length, mainFile, totalSections: sections.length, files: files.slice(0, 10) };
+        });
+        return text(JSON.stringify(result, null, 2));
       }
 
       case 'write_file': {
-        const client = getProject(args.projectName);
-        const result = await client.writeFile(args.filePath, args.content, args.commitMessage);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: result || 'File written and pushed successfully.',
-            },
-          ],
-        };
+        const result = await withProjectLock(projectId, () =>
+          client.writeFile(args.filePath, args.content, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
       }
 
       case 'write_section': {
-        const client = getProject(args.projectName);
-        const result = await client.writeSection(
-          args.filePath,
-          args.sectionTitle,
-          args.newContent,
-          args.commitMessage
+        const result = await withProjectLock(projectId, () =>
+          client.writeSection(args.filePath, args.sectionTitle, args.newContent, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
         );
-        return {
-          content: [
-            {
-              type: 'text',
-              text: result || 'Section written and pushed successfully.',
-            },
-          ],
-        };
+        return text(formatWriteResult(result));
       }
 
       default:
-        throw new Error(`Unknown tool: ${name}`);
+        throw new Error(`Unknown tool: "${name}"`);
     }
-  } catch (error) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${error.message}`,
-        },
-      ],
-      isError: true,
-    };
+  } catch (err) {
+    return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
   }
 });
 
-// Start server
+// ─── Response helpers ─────────────────────────────────────────────────────────
+
+function text(str) {
+  return { content: [{ type: 'text', text: str }] };
+}
+
+function formatWriteResult(result) {
+  if (result?.dryRun) {
+    const lines = ['Dry run: no changes written.'];
+    if ('existingSize' in result) lines.push(`Existing file size: ${result.existingSize} characters`);
+    if ('newSize' in result) lines.push(`New content size:   ${result.newSize} characters`);
+    if ('sectionFound' in result) lines.push(`Section found: ${result.sectionFound}`);
+    if ('newContentSize' in result) lines.push(`New content size: ${result.newContentSize} characters`);
+    return lines.join('\n');
+  }
+  if (result?.message) return result.message;
+  return 'Done.';
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Overleaf MCP server running on stdio');
+  console.error('[OverleafMCP] Server running on stdio');
 }
 
-main().catch((error) => {
-  console.error('Fatal error:', error);
+main().catch(err => {
+  console.error('[OverleafMCP] Fatal error:', err);
   process.exit(1);
 });
