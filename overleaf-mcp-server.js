@@ -89,12 +89,22 @@ function getProject(projectName) {
     );
   }
 
+  // Resolve disallowedTools: per-project list takes precedence over the global
+  // defaults block. readOnly: true is a shorthand for disallowing all write tools
+  // and takes precedence over everything else.
+  const globalDefaults = projectsConfig.defaults?.disallowedTools ?? [];
+  const projectDisallowed = project.disallowedTools ?? globalDefaults;
+  const disallowedTools = new Set(
+    project.readOnly === true ? [...WRITE_TOOLS] : projectDisallowed
+  );
+
   return {
     client: new OverleafGitClient(project.projectId, project.gitToken, TEMP_DIR),
     projectId: project.projectId,
     resolvedName: projectName,
     // readOnly defaults to false — omitting the field means the project is writable.
     readOnly: project.readOnly === true,
+    disallowedTools,
   };
 }
 
@@ -740,25 +750,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     // list_projects reads only in-memory config — no client or lock needed.
     if (name === 'list_projects') {
+      const globalDefaults = projectsConfig.defaults?.disallowedTools ?? [];
       const projects = Object.entries(projectsConfig.projects ?? {}).map(([key, p]) => ({
         id: key,
         name: p.name,
         projectId: p.projectId,
         readOnly: p.readOnly === true,
+        disallowedTools: p.readOnly === true
+          ? [...WRITE_TOOLS]
+          : (p.disallowedTools ?? globalDefaults),
       }));
       return text(JSON.stringify(projects, null, 2));
     }
 
     // All other tools require a project context.
-    const { client, projectId, resolvedName, readOnly } = getProject(args.projectName);
+    const { client, projectId, resolvedName, readOnly, disallowedTools } = getProject(args.projectName);
 
-    // Central read-only guard: checked once here, applies to every write tool
-    // automatically as new ones are added to the WRITE_TOOLS registry above.
-    if (WRITE_TOOLS.has(name) && readOnly) {
-      throw new Error(
-        `Project "${resolvedName}" is configured as read-only. ` +
-        `Set "readOnly": false in projects.json to enable write operations.`
-      );
+    // Central permission guard. readOnly is enforced via disallowedTools (all
+    // write tools are added to the set when readOnly: true), so a single check
+    // here covers both readOnly and fine-grained disallowedTools restrictions.
+    if (disallowedTools.has(name)) {
+      const reason = readOnly
+        ? `Project "${resolvedName}" is configured as read-only. Set "readOnly": false in projects.json to enable write operations.`
+        : `Tool "${name}" is disallowed for project "${resolvedName}". Remove it from "disallowedTools" in projects.json to enable it.`;
+      throw new Error(reason);
     }
 
     switch (name) {
