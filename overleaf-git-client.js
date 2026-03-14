@@ -238,7 +238,11 @@ export class OverleafGitClient {
 
     async readFile(filePath) {
         await this.cloneOrPull();
-        return fs.readFile(this._safePath(filePath), 'utf-8');
+        const content = await fs.readFile(this._safePath(filePath), 'utf-8');
+        // Normalise Windows-style CRLF to LF. Overleaf's git server uses CRLF on
+        // some projects. Without this, str_replace and insert_before/after anchors
+        // constructed with LF would fail to match even when visually identical.
+        return content.replace(/\r\n/g, '\n');
     }
 
     /**
