@@ -1,188 +1,270 @@
-# Overleaf MCP Server
+# OverleafMCP
 
-An MCP (Model Context Protocol) server that provides access to Overleaf projects via Git integration. This allows Claude and other MCP clients to read LaTeX files, analyze document structure, extract content, and write files from and to Overleaf projects.
+An MCP (Model Context Protocol) server that gives Claude direct access to Overleaf projects through Git integration. Read, write, and surgically edit LaTeX documents and BibTeX bibliographies without leaving your conversation.
+
+---
 
 ## Features
 
-- 📄 **File Management**: List, read, and write files from and to Overleaf projects
-- 📋 **Document Structure**: Parse LaTeX sections and subsections
-- 🔍 **Content Extraction**: Extract specific sections by title
-- 📊 **Project Summary**: Get overview of project status and structure
-- 🏗️ **Multi-Project Support**: Manage multiple Overleaf projects
+- Read files, document structure, preamble, postamble, and individual sections from any configured Overleaf project
+- Write entire files or replace individual sections with automatic commit and push
+- Surgical edits via `str_replace`, `insert_before`, and `insert_after` — no full-file rewrites needed
+- BibTeX entry management: get, add, replace, and remove individual entries by cite key
+- Git history and diff inspection
+- Per-project read-only mode to protect published or archived projects from accidental writes
+- In-process per-project locking: safe concurrent tool calls with no external dependencies
+- Dirty-state recovery: if the server crashes mid-write, staged changes are committed on next startup
+- Path traversal protection on all file operations
+- No Redis, no Docker required
+
+---
+
+## Requirements
+
+- Node.js >= 18
+- Git installed and available on `PATH`
+- An Overleaf account with Git integration enabled (Overleaf premium feature)
+
+---
 
 ## Installation
 
-1. Clone this repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+git clone https://github.com/SemPlaatsman/OverleafMCP.git
+cd OverleafMCP
+npm install
+cp projects.example.json projects.json
+```
 
-3. Set up your projects configuration:
-   ```bash
-   cp projects.example.json projects.json
-   ```
+Edit `projects.json` with your Overleaf credentials:
 
-4. Edit `projects.json` with your Overleaf credentials:
-   ```json
-   {
-     "projects": {
-       "default": {
-         "name": "My Paper",
-         "projectId": "YOUR_OVERLEAF_PROJECT_ID",
-         "gitToken": "YOUR_OVERLEAF_GIT_TOKEN"
-       }
-     }
-   }
-   ```
+```json
+{
+  "projects": {
+    "my-paper": {
+      "name": "My Paper",
+      "projectId": "YOUR_OVERLEAF_PROJECT_ID",
+      "gitToken": "YOUR_OVERLEAF_GIT_TOKEN",
+      "readOnly": false
+    }
+  }
+}
+```
 
-## Getting Overleaf Credentials
+### Getting your credentials
 
-1. **Git Token**: 
-   - Go to Overleaf Account Settings → Git Integration
-   - Click "Create Token"
+**Project ID:** Open your project in Overleaf. The ID is in the URL:
+`https://www.overleaf.com/project/[PROJECT_ID]`
 
-2. **Project ID**: 
-   - Open your Overleaf project
-   - Find it in the URL: `https://www.overleaf.com/project/[PROJECT_ID]`
+**Git token:** Go to Overleaf Account Settings, then Git Integration, then create a token.
+
+---
+
+## Configuration
+
+All options have sensible defaults and can be overridden with environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROJECTS_FILE` | `./projects.json` | Path to the projects config file |
+| `OVERLEAF_TEMP_DIR` | `./temp` | Directory for local git clones |
+| `OVERLEAF_GIT_AUTHOR_NAME` | (git global config) | Git author name for commits |
+| `OVERLEAF_GIT_AUTHOR_EMAIL` | (git global config) | Git author email for commits |
+
+Setting `OVERLEAF_GIT_AUTHOR_NAME` and `OVERLEAF_GIT_AUTHOR_EMAIL` is recommended on environments where git is not globally configured, otherwise commits will fail.
+
+---
 
 ## Claude Desktop Setup
 
 Add to your Claude Desktop configuration file:
 
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Linux**: `~/.config/claude/claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/claude/claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "overleaf": {
       "command": "node",
-      "args": [
-        "/path/to/OverleafMCP/overleaf-mcp-server.js"
-      ]
+      "args": ["/absolute/path/to/OverleafMCP/overleaf-mcp-server.js"],
+      "env": {
+        "OVERLEAF_GIT_AUTHOR_NAME": "Your Name",
+        "OVERLEAF_GIT_AUTHOR_EMAIL": "you@example.com"
+      }
     }
   }
 }
 ```
 
-Restart Claude Desktop after configuration.
+Restart Claude Desktop after saving the configuration.
+
+---
 
 ## Available Tools
 
-### `list_projects`
-List all configured projects.
+Tools are grouped below by purpose. All write tools support an optional `commitMessage`, a `push` boolean (default `true`), and a `dryRun` boolean (default `false`) that validates inputs and reports sizes without writing anything.
 
-### `list_files`
-List files in a project (default: .tex files).
-- `extension`: File extension filter (optional)
-- `projectName`: Project identifier (optional, defaults to "default")
+### Project navigation
 
-### `read_file`
-Read a specific file from the project.
-- `filePath`: Path to the file (required)
-- `projectName`: Project identifier (optional)
+**`list_projects`**
+List all configured projects, including their `readOnly` status.
 
-### `get_sections`
-Get all sections from a LaTeX file.
-- `filePath`: Path to the LaTeX file (required)
-- `projectName`: Project identifier (optional)
+**`list_files`**
+List files in a project. Defaults to `.tex` files; pass `extension` to filter by a different extension (e.g. `".bib"`).
 
-### `get_section_content`
-Get content of a specific section.
-- `filePath`: Path to the LaTeX file (required)
-- `sectionTitle`: Title of the section (required)
-- `projectName`: Project identifier (optional)
+**`status_summary`**
+High-level overview of a project: total file count, main file, and section structure.
 
-### `status_summary`
-Get a comprehensive project status summary.
-- `projectName`: Project identifier (optional)
+### Reading LaTeX files
 
-### `write_full`
-Write the full content of a file to the project.
-- `filePath`: Path to the file (required)
-- `content`: Content to write to the file (required)
-- `commitMessage`: Commit message (required)
-- `projectName`: Project identifier (optional)
+**`read_file`**
+Read the full contents of any file.
 
-### `write_section`
-Write the content of a specific section to the project.
-- `filePath`: Path to the file (required)
-- `sectionTitle`: Title of the section (required)
-- `content`: Content to write to the section (required)
-- `commitMessage`: Commit message (required)
-- `projectName`: Project identifier (optional)
+**`get_sections`**
+Get all sectioning commands from a `.tex` file as a hierarchical tree. Each node includes its type (`section`, `subsection`, etc.), title, character offset, the text immediately following that heading (not including children), a 100-character preview, and a `children` array of nested sections. Supports all seven LaTeX levels including starred variants (`\section*{}`).
 
-## Usage Examples
+**`get_section_content`**
+Get the full content of a specific named section. Supply the optional `parentTitle` parameter to disambiguate when the same section title appears under multiple parent sections.
 
-```
-# List all projects
-Use the list_projects tool
+**`get_preamble`**
+Get everything before the first sectioning command: document class declaration, package imports, and custom command definitions. Returns the full file content if no sections exist. Only applicable to `.tex` files.
 
-# Get project overview
-Use status_summary tool
+**`get_postamble`**
+Get everything from `\end{document}` (inclusive) to the end of the file. Returns an empty string if `\end{document}` is absent (e.g. `\input`'d files). Note that bibliography commands (`\bibliography{}`, `\printbibliography`) appear before `\end{document}` and fall within the last section's content range — use `str_replace` to edit them. Only applicable to `.tex` files.
 
-# Read main.tex file
-Use read_file with filePath: "main.tex"
+### Git inspection
 
-# Get Introduction section
-Use get_section_content with filePath: "main.tex" and sectionTitle: "Introduction"
+**`list_history`**
+Show recent git commits. Supports `limit` (default 20, max 200), `filePath` to filter by file, and `since`/`until` time filters (e.g. `"2.weeks"` or `"2025-01-01"`).
 
-# List all sections in a file
-Use get_sections with filePath: "main.tex"
+**`get_diff`**
+Get a unified diff. Defaults to all changes since the last commit (working tree vs HEAD). Supply `fromRef` and/or `toRef` to diff between specific commits or branches. Supports `filePaths` array, `contextLines` (default 3, max 10), and `maxOutputChars` (default 120000).
 
-# Write the full content of a file to the project
-Use write_full with filePath: "main.tex", content: "...", commitMessage: "..."
+### Writing LaTeX files
 
-# Write the content of a specific section to the project
-Use write_section with filePath: "main.tex", sectionTitle: "Introduction", content: "...", commitMessage: "..."
-```
+**`write_file`**
+Overwrite an entire file. Use for new file creation or full-file replacements only. Prefer `str_replace`, `insert_before`, `insert_after`, or `write_section` for targeted edits.
 
-## Multi-Project Usage
+**`write_section`**
+Replace a single named section in a `.tex` file. Only the named section is replaced; everything else is untouched. The boundary is level-aware: the section ends where the next command of equal or higher level begins, or at `\end{document}` if there is none. Only applicable to `.tex` files.
 
-To work with multiple projects, add them to `projects.json`:
+**`str_replace`**
+Replace the single unique occurrence of `oldStr` with `newStr` in any file. `oldStr` must match exactly once — if it matches zero or multiple locations, an error is returned with the occurrence count so you can add more surrounding context to make it unambiguous. Setting `newStr` to an empty string deletes `oldStr`. This is the preferred tool for targeted edits anywhere in a file, including the preamble and bibliography commands.
+
+**`insert_before`**
+Insert content immediately before the single unique occurrence of `anchorStr`. Same uniqueness rules as `str_replace`.
+
+**`insert_after`**
+Insert content immediately after the single unique occurrence of `anchorStr`. Same uniqueness rules as `str_replace`. Useful for appending a new `\usepackage` line after the last existing one.
+
+### BibTeX management
+
+All BibTeX tools operate on `.bib` files. The `entry` and `newEntry` parameters accept a complete raw BibTeX string of any entry type (`@article`, `@book`, `@inproceedings`, `@misc`, etc.).
+
+**`get_bib_entry`**
+Get the raw BibTeX block for a single cite key.
+
+**`add_bib_entry`**
+Append a new BibTeX entry. The cite key is extracted server-side. Returns an error if the cite key already exists, pointing you to `replace_bib_entry` instead.
+
+**`replace_bib_entry`**
+Replace the entry with the given cite key with a new raw BibTeX block. The replacement may use a different cite key if desired.
+
+**`remove_bib_entry`**
+Remove the entry with the given cite key. Surrounding whitespace is normalised to keep the file tidy.
+
+---
+
+## Multi-project usage
+
+Add multiple entries to `projects.json` and reference them by key in tool calls:
 
 ```json
 {
+  "defaults": {
+    "disallowedTools": []
+  },
   "projects": {
-    "default": {
-      "name": "Main Paper",
-      "projectId": "project-id-1",
-      "gitToken": "token-1"
+    "active-paper": {
+      "name": "Current Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "readOnly": false
     },
-    "paper2": {
-      "name": "Second Paper", 
-      "projectId": "project-id-2",
-      "gitToken": "token-2"
+    "published-paper": {
+      "name": "Published Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "readOnly": true
     }
   }
 }
 ```
 
-Then specify the project in tool calls:
-```
-Use get_section_content with projectName: "paper2", filePath: "main.tex", sectionTitle: "Methods"
+Then pass `projectName: "active-paper"` in any tool call to target a specific project.
+
+### `projectName` selection behaviour
+
+- **Single project configured:** `projectName` can be omitted; the server resolves the project automatically.
+- **Multiple projects configured:** `projectName` must be supplied. If omitted, the server returns an error listing the available project keys. This is intentional: silently resolving to the wrong project on a write operation would be worse than an explicit error.
+
+### Read-only projects
+
+Setting `"readOnly": true` on a project allows all read operations but rejects any write operation with a clear error message. The default is `false`, so omitting the field has no effect. This is useful for protecting published or archived papers from accidental edits.
+
+### Fine-grained tool permissions
+
+For more selective control, use `disallowedTools` to block specific tools rather than all writes. This works at two levels.
+
+A `defaults` block at the top of `projects.json` sets the baseline for all projects:
+
+```json
+{
+  "defaults": {
+    "disallowedTools": ["write_file", "remove_bib_entry"]
+  },
+  "projects": {
+    "my-paper": {
+      "name": "My Paper",
+      "projectId": "...",
+      "gitToken": "..."
+    }
+  }
+}
 ```
 
-## File Structure
+A per-project `disallowedTools` array overrides the global defaults entirely for that project:
 
+```json
+{
+  "defaults": {
+    "disallowedTools": ["write_file"]
+  },
+  "projects": {
+    "my-paper": {
+      "name": "My Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "disallowedTools": []
+    }
+  }
+}
 ```
-OverleafMCP/
-├── overleaf-mcp-server.js    # Main MCP server
-├── overleaf-git-client.js    # Git client library
-├── projects.json             # Your project configuration (gitignored)
-├── projects.example.json     # Example configuration
-├── package.json              # Dependencies
-└── README.md                 # This file
-```
 
-## Security Notes
+In this example the global default blocks `write_file`, but `my-paper` overrides it with an empty list, making all tools available.
 
-- `projects.json` is gitignored to protect your credentials
-- Never commit real project IDs or Git tokens
-- Use the provided `projects.example.json` as a template
+The resolution order is: `readOnly: true` (blocks all writes, takes precedence over everything) → per-project `disallowedTools` → global `defaults.disallowedTools`. Omitting `disallowedTools` at either level falls through to the next. The valid tool names are the same names used in tool calls: `write_file`, `write_section`, `str_replace`, `insert_before`, `insert_after`, `add_bib_entry`, `replace_bib_entry`, `remove_bib_entry`.
+
+---
+
+## Attribution
+
+See [ATTRIBUTION.md](./ATTRIBUTION.md) for credits to the open-source projects that informed this work.
+
+---
 
 ## License
 
-MIT License
+MIT. See [LICENSE](./LICENSE).

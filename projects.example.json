@@ -1,14 +1,21 @@
 {
+  "defaults": {
+    "disallowedTools": []
+  },
   "projects": {
-    "default": {
+    "my-paper": {
       "name": "My Paper",
-      "projectId": "YOUR_PROJECT_ID",
-      "gitToken": "YOUR_GIT_TOKEN"
+      "projectId": "YOUR_OVERLEAF_PROJECT_ID",
+      "gitToken": "YOUR_OVERLEAF_GIT_TOKEN",
+      "readOnly": false,
+      "disallowedTools": []
     },
-    "project2": {
-      "name": "Another Paper",
-      "projectId": "ANOTHER_PROJECT_ID", 
-      "gitToken": "ANOTHER_GIT_TOKEN"
+    "my-other-paper": {
+      "name": "My Other Paper",
+      "projectId": "YOUR_OVERLEAF_PROJECT_ID",
+      "gitToken": "YOUR_OVERLEAF_GIT_TOKEN",
+      "readOnly": true,
+      "disallowedTools": []
     }
   }
 }
