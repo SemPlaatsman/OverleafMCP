@@ -77,6 +77,21 @@ export class OverleafGitClient {
         // Nothing staged means the write produced no actual change.
         const { stdout: staged } = await this._git(['diff', '--cached', '--name-only']);
         if (!staged.trim()) {
+            // Even with nothing new to commit, push if requested — this flushes any
+            // local commits from a previous push:false operation, which would otherwise
+            // be permanently stranded with no way to reach the remote.
+            if (push) {
+                try {
+                    await this._git(['push']);
+                } catch (err) {
+                    const output = (err.stdout ?? '') + (err.stderr ?? '');
+                    if (output.includes('rejected') || output.includes('non-fast-forward')) {
+                        throw new Error('Push rejected: remote has new changes. Pull and retry.');
+                    }
+                    throw err;
+                }
+                return { committed: false, pushed: true, message: 'No new changes to commit; pushed any pending local commits' };
+            }
             return { committed: false, pushed: false, message: 'No changes to commit' };
         }
 
@@ -835,12 +850,13 @@ export class OverleafGitClient {
         }
 
         // Trim trailing newlines from before and leading newlines from after,
-        // then rejoin with a single blank line. This prevents blank lines from
-        // accumulating over repeated add/remove cycles regardless of how the
-        // surrounding entries are formatted.
+        // then rejoin. When after is empty (last entry removed), use a single
+        // trailing newline rather than \n\n to avoid a blank line at end of file.
         const before = fileContent.slice(0, target.start).replace(/\n*$/, '');
         const after = fileContent.slice(target.end).replace(/^\n*/, '');
-        const updated = before ? before + '\n\n' + after : after;
+        const updated = before && after
+            ? before + '\n\n' + after   // entries on both sides: one blank line between
+            : (before || after) + '\n'; // only one side remains: clean trailing newline
 
         await fs.writeFile(fullPath, updated, 'utf-8');
         return this._commitAndPush(filePath, commitMessage, push);
