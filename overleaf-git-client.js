@@ -453,6 +453,46 @@ export class OverleafGitClient {
     // ─── Public write API ────────────────────────────────────────────────────────
 
     /**
+     * Internal helper shared by strReplace, insertBefore, and insertAfter.
+     * Finds the single occurrence of anchorStr in content and returns its index.
+     *
+     * Throws a descriptive error if the anchor appears zero or more than once,
+     * with the occurrence count included so the LLM can self-correct.
+     */
+    _findUniqueAnchor(content, anchorStr, label = 'oldStr') {
+        if (!anchorStr) throw new Error(`${label} must not be empty`);
+
+        let index = -1;
+        let count = 0;
+        let searchFrom = 0;
+
+        while (true) {
+            const found = content.indexOf(anchorStr, searchFrom);
+            if (found === -1) break;
+            count++;
+            index = found;
+            searchFrom = found + 1;
+            if (count > 1) break; // No need to count further.
+        }
+
+        if (count === 0) {
+            throw new Error(`${label} not found in file. Check for whitespace or line-ending differences.`);
+        }
+        if (count > 1) {
+            // Count all occurrences properly for the error message.
+            let total = 0;
+            let pos = 0;
+            while ((pos = content.indexOf(anchorStr, pos)) !== -1) { total++; pos++; }
+            throw new Error(
+                `${label} matches ${total} locations — it must be unique. ` +
+                `Add more surrounding context to make it unambiguous.`
+            );
+        }
+
+        return index;
+    }
+
+    /**
      * Overwrites an entire file.
      *
      * Options:
@@ -524,6 +564,96 @@ export class OverleafGitClient {
             fileContent.slice(0, target.startIndex) +
             newContent.trimEnd() + '\n\n' +
             fileContent.slice(endIdx);
+
+        await fs.writeFile(fullPath, updated, 'utf-8');
+        return this._commitAndPush(filePath, commitMessage, push);
+    }
+
+    /**
+     * Replaces the single unique occurrence of oldStr with newStr in a file.
+     *
+     * oldStr must appear exactly once — if it appears zero or more than once,
+     * an error is returned with the occurrence count so the caller can add
+     * more surrounding context to make the anchor unambiguous.
+     *
+     * Options: same as writeFile.
+     */
+    async strReplace(filePath, oldStr, newStr, {
+        commitMessage = 'Edit via Overleaf MCP',
+        push = true,
+        dryRun = false,
+    } = {}) {
+        await this.cloneOrPull();
+        const fullPath = this._safePath(filePath);
+        const fileContent = await fs.readFile(fullPath, 'utf-8');
+
+        const idx = this._findUniqueAnchor(fileContent, oldStr, 'oldStr');
+        const updated = fileContent.slice(0, idx) + newStr + fileContent.slice(idx + oldStr.length);
+
+        if (dryRun) {
+            return {
+                dryRun: true,
+                anchorIndex: idx,
+                oldSize: fileContent.length,
+                newSize: updated.length,
+            };
+        }
+
+        await fs.writeFile(fullPath, updated, 'utf-8');
+        return this._commitAndPush(filePath, commitMessage, push);
+    }
+
+    /**
+     * Inserts newContent immediately before the single unique occurrence of
+     * anchorStr in a file.
+     *
+     * anchorStr must appear exactly once — same uniqueness rules as strReplace.
+     *
+     * Options: same as writeFile.
+     */
+    async insertBefore(filePath, anchorStr, newContent, {
+        commitMessage = 'Edit via Overleaf MCP',
+        push = true,
+        dryRun = false,
+    } = {}) {
+        await this.cloneOrPull();
+        const fullPath = this._safePath(filePath);
+        const fileContent = await fs.readFile(fullPath, 'utf-8');
+
+        const idx = this._findUniqueAnchor(fileContent, anchorStr, 'anchorStr');
+        const updated = fileContent.slice(0, idx) + newContent + fileContent.slice(idx);
+
+        if (dryRun) {
+            return { dryRun: true, anchorIndex: idx };
+        }
+
+        await fs.writeFile(fullPath, updated, 'utf-8');
+        return this._commitAndPush(filePath, commitMessage, push);
+    }
+
+    /**
+     * Inserts newContent immediately after the single unique occurrence of
+     * anchorStr in a file.
+     *
+     * anchorStr must appear exactly once — same uniqueness rules as strReplace.
+     *
+     * Options: same as writeFile.
+     */
+    async insertAfter(filePath, anchorStr, newContent, {
+        commitMessage = 'Edit via Overleaf MCP',
+        push = true,
+        dryRun = false,
+    } = {}) {
+        await this.cloneOrPull();
+        const fullPath = this._safePath(filePath);
+        const fileContent = await fs.readFile(fullPath, 'utf-8');
+
+        const idx = this._findUniqueAnchor(fileContent, anchorStr, 'anchorStr');
+        const updated = fileContent.slice(0, idx + anchorStr.length) + newContent + fileContent.slice(idx + anchorStr.length);
+
+        if (dryRun) {
+            return { dryRun: true, anchorIndex: idx };
+        }
 
         await fs.writeFile(fullPath, updated, 'utf-8');
         return this._commitAndPush(filePath, commitMessage, push);
