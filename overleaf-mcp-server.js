@@ -107,6 +107,9 @@ function getProject(projectName) {
 const WRITE_TOOLS = new Set([
   'write_file',
   'write_section',
+  'str_replace',
+  'insert_before',
+  'insert_after',
 ]);
 
 // ─── MCP server ───────────────────────────────────────────────────────────────
@@ -359,7 +362,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'write_file',
       description:
         'Overwrite an entire file in an Overleaf project. ' +
-        'Prefer write_section or (once available) str_replace for targeted edits. ' +
+        'Prefer str_replace, insert_before, or insert_after for targeted edits, ' +
+        'or write_section for full section replacements. ' +
         'Use this for new file creation or full-file replacements only.',
       inputSchema: {
         type: 'object',
@@ -436,6 +440,142 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['filePath', 'sectionTitle', 'newContent'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'str_replace',
+      description:
+        'Replace the single unique occurrence of oldStr with newStr in a file. ' +
+        'oldStr must appear exactly once — if it matches zero or multiple locations, ' +
+        'an error is returned with the occurrence count so you can add more surrounding ' +
+        'context to make it unambiguous. ' +
+        'This is the preferred tool for targeted edits anywhere in a file, including ' +
+        'the preamble, bibliography commands, and inline content.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the file',
+          },
+          oldStr: {
+            type: 'string',
+            description:
+              'The exact string to find and replace. Must appear exactly once in the file. ' +
+              'Include enough surrounding context to make it unique.',
+          },
+          newStr: {
+            type: 'string',
+            description: 'The replacement string. May be empty to delete oldStr.',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Edit via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description:
+              'If true, verify oldStr is unique and return its position without writing anything ' +
+              '(optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'oldStr', 'newStr'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'insert_before',
+      description:
+        'Insert newContent immediately before the single unique occurrence of anchorStr in a file. ' +
+        'anchorStr must appear exactly once — same uniqueness rules as str_replace. ' +
+        'Use this for pure insertions where no existing content should be removed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the file',
+          },
+          anchorStr: {
+            type: 'string',
+            description:
+              'The exact string to insert before. Must appear exactly once in the file.',
+          },
+          newContent: {
+            type: 'string',
+            description: 'The content to insert immediately before anchorStr.',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Edit via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, verify anchorStr is unique without writing anything (optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'anchorStr', 'newContent'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'insert_after',
+      description:
+        'Insert newContent immediately after the single unique occurrence of anchorStr in a file. ' +
+        'anchorStr must appear exactly once — same uniqueness rules as str_replace. ' +
+        'Use this for pure insertions where no existing content should be removed, ' +
+        'for example appending a new \\usepackage line after the last existing one.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the file',
+          },
+          anchorStr: {
+            type: 'string',
+            description:
+              'The exact string to insert after. Must appear exactly once in the file.',
+          },
+          newContent: {
+            type: 'string',
+            description: 'The content to insert immediately after anchorStr.',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Edit via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, verify anchorStr is unique without writing anything (optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'anchorStr', 'newContent'],
         additionalProperties: false,
       },
     },
@@ -588,6 +728,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return text(formatWriteResult(result));
       }
 
+      case 'str_replace': {
+        const result = await withProjectLock(projectId, () =>
+          client.strReplace(args.filePath, args.oldStr, args.newStr, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
+      }
+
+      case 'insert_before': {
+        const result = await withProjectLock(projectId, () =>
+          client.insertBefore(args.filePath, args.anchorStr, args.newContent, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
+      }
+
+      case 'insert_after': {
+        const result = await withProjectLock(projectId, () =>
+          client.insertAfter(args.filePath, args.anchorStr, args.newContent, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
+      }
+
       default:
         throw new Error(`Unknown tool: "${name}"`);
     }
@@ -609,6 +782,7 @@ function formatWriteResult(result) {
     if ('newSize' in result) lines.push(`New content size:   ${result.newSize} characters`);
     if ('sectionFound' in result) lines.push(`Section found: ${result.sectionFound}`);
     if ('newContentSize' in result) lines.push(`New content size: ${result.newContentSize} characters`);
+    if ('anchorIndex' in result) lines.push(`Anchor position: character ${result.anchorIndex}`);
     return lines.join('\n');
   }
   if (result?.message) return result.message;
