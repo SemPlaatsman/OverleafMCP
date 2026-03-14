@@ -658,4 +658,191 @@ export class OverleafGitClient {
         await fs.writeFile(fullPath, updated, 'utf-8');
         return this._commitAndPush(filePath, commitMessage, push);
     }
+
+    // ─── BibTeX API ──────────────────────────────────────────────────────────────
+
+    /**
+     * Parses a .bib file string into an array of entry objects.
+     * Each object contains:
+     *   citeKey   — the citation key, e.g. "smith2024"
+     *   entryType — the type without @, e.g. "article"
+     *   raw       — the full raw BibTeX block including the @type{...} wrapper
+     *   start     — byte offset of the @ in the source string
+     *   end       — byte offset of the character after the closing }
+     *
+     * Handles arbitrarily nested braces inside field values.
+     * Ignores @comment, @string, and @preamble meta-entries.
+     */
+    _parseBibEntries(content) {
+        const entries = [];
+        // Match the start of each entry: @type{ or @type(
+        const entryStart = /@([A-Za-z]+)\s*[{(]/g;
+        let match;
+
+        while ((match = entryStart.exec(content)) !== null) {
+            const type = match[1].toLowerCase();
+
+            // Skip BibTeX meta-entries that are not citable.
+            if (type === 'comment' || type === 'string' || type === 'preamble') continue;
+
+            const openBraceIdx = match.index + match[0].length - 1;
+            const openChar = content[openBraceIdx];
+            const closeChar = openChar === '{' ? '}' : ')';
+
+            // Walk forward tracking brace depth to find the matching close.
+            let depth = 1;
+            let i = openBraceIdx + 1;
+            while (i < content.length && depth > 0) {
+                if (content[i] === openChar) depth++;
+                if (content[i] === closeChar) depth--;
+                i++;
+            }
+
+            if (depth !== 0) continue; // Malformed entry, skip.
+
+            const raw = content.slice(match.index, i);
+            const end = i;
+
+            // Extract cite key: first token after the opening brace/paren, up to a comma.
+            const keyMatch = raw.match(/@[A-Za-z]+\s*[{(]\s*([^,\s]+)\s*,/);
+            if (!keyMatch) continue;
+
+            entries.push({
+                citeKey: keyMatch[1],
+                entryType: type,
+                raw,
+                start: match.index,
+                end,
+            });
+        }
+
+        return entries;
+    }
+
+    /**
+     * Returns the raw BibTeX block for a given cite key, or null if not found.
+     */
+    async getBibEntry(filePath, citeKey) {
+        const content = await this.readFile(filePath);
+        const entries = this._parseBibEntries(content);
+        return entries.find(e => e.citeKey === citeKey)?.raw ?? null;
+    }
+
+    /**
+     * Appends a new BibTeX entry to a .bib file.
+     *
+     * entry must be a raw BibTeX string, e.g.:
+     *   @article{smith2024, author = {Smith, John}, ... }
+     *
+     * Any valid BibTeX entry type is accepted (@article, @book,
+     * @inproceedings, @misc, etc.). The cite key is extracted server-side
+     * from the entry string. If the cite key already exists in the file,
+     * an error is returned.
+     *
+     * Options: same as writeFile.
+     */
+    async addBibEntry(filePath, entry, {
+        commitMessage = 'Add bib entry via Overleaf MCP',
+        push = true,
+        dryRun = false,
+    } = {}) {
+        await this.cloneOrPull();
+        const fullPath = this._safePath(filePath);
+        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const entries = this._parseBibEntries(fileContent);
+
+        // Extract the cite key from the new entry.
+        const keyMatch = entry.match(/@[A-Za-z]+\s*[{(]\s*([^,\s]+)\s*,/);
+        if (!keyMatch) throw new Error('Could not extract cite key from entry. Ensure the entry is valid BibTeX.');
+        const citeKey = keyMatch[1];
+
+        if (entries.some(e => e.citeKey === citeKey)) {
+            throw new Error(`Cite key "${citeKey}" already exists in "${filePath}". Use replace_bib_entry to update it.`);
+        }
+
+        if (dryRun) {
+            return { dryRun: true, citeKey, action: 'add' };
+        }
+
+        // Always produce exactly one blank line between existing content and the
+        // new entry. Handle the edge case of an empty or whitespace-only file.
+        const updated = fileContent.trim()
+            ? fileContent.trimEnd() + '\n\n' + entry.trim() + '\n'
+            : entry.trim() + '\n';
+
+        await fs.writeFile(fullPath, updated, 'utf-8');
+        return this._commitAndPush(filePath, commitMessage, push);
+    }
+
+    /**
+     * Replaces the entry with the given cite key with a new raw BibTeX block.
+     *
+     * The cite key is taken from the existing file entry being replaced —
+     * the new entry may use a different cite key if desired.
+     *
+     * Options: same as writeFile.
+     */
+    async replaceBibEntry(filePath, citeKey, newEntry, {
+        commitMessage = 'Update bib entry via Overleaf MCP',
+        push = true,
+        dryRun = false,
+    } = {}) {
+        await this.cloneOrPull();
+        const fullPath = this._safePath(filePath);
+        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const entries = this._parseBibEntries(fileContent);
+
+        const target = entries.find(e => e.citeKey === citeKey);
+        if (!target) throw new Error(`Cite key "${citeKey}" not found in "${filePath}".`);
+
+        if (dryRun) {
+            return { dryRun: true, citeKey, action: 'replace' };
+        }
+
+        const updated =
+            fileContent.slice(0, target.start) +
+            newEntry.trim() +
+            fileContent.slice(target.end);
+
+        await fs.writeFile(fullPath, updated, 'utf-8');
+        return this._commitAndPush(filePath, commitMessage, push);
+    }
+
+    /**
+     * Removes the entry with the given cite key from a .bib file.
+     *
+     * Trailing whitespace before the entry and leading whitespace after it are
+     * both normalised so the surrounding entries remain separated by exactly one
+     * blank line, preventing accumulation over repeated add/remove cycles.
+     *
+     * Options: same as writeFile.
+     */
+    async removeBibEntry(filePath, citeKey, {
+        commitMessage = 'Remove bib entry via Overleaf MCP',
+        push = true,
+        dryRun = false,
+    } = {}) {
+        await this.cloneOrPull();
+        const fullPath = this._safePath(filePath);
+        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const entries = this._parseBibEntries(fileContent);
+
+        const target = entries.find(e => e.citeKey === citeKey);
+        if (!target) throw new Error(`Cite key "${citeKey}" not found in "${filePath}".`);
+
+        if (dryRun) {
+            return { dryRun: true, citeKey, action: 'remove' };
+        }
+
+        // Trim trailing newlines from before and leading newlines from after,
+        // then rejoin with a single blank line. This prevents blank lines from
+        // accumulating over repeated add/remove cycles regardless of how the
+        // surrounding entries are formatted.
+        const before = fileContent.slice(0, target.start).replace(/\n*$/, '');
+        const after = fileContent.slice(target.end).replace(/^\n*/, '');
+        const updated = before ? before + '\n\n' + after : after;
+
+        await fs.writeFile(fullPath, updated, 'utf-8');
+        return this._commitAndPush(filePath, commitMessage, push);
+    }
 }
