@@ -35,6 +35,44 @@ try {
   process.exit(1);
 }
 
+// ─── Write-tool registry ──────────────────────────────────────────────────────
+//
+// Defined before getProject so the function can reference it safely.
+// All tools that perform any write operation must be listed here.
+// Adding a new write tool only requires adding its name to this set.
+//
+const WRITE_TOOLS = new Set([
+  'write_file',
+  'write_section',
+  'str_replace',
+  'insert_before',
+  'insert_after',
+  'add_bib_entry',
+  'replace_bib_entry',
+  'remove_bib_entry',
+]);
+
+// Validate disallowedTools entries at startup so typos surface immediately
+// rather than silently doing nothing at runtime.
+for (const [key, project] of Object.entries(projectsConfig.projects ?? {})) {
+  for (const toolName of (project.disallowedTools ?? [])) {
+    if (!WRITE_TOOLS.has(toolName)) {
+      console.warn(
+        `[OverleafMCP] Warning: unknown tool "${toolName}" in disallowedTools for project "${key}". ` +
+        `Valid tools are: ${[...WRITE_TOOLS].join(', ')}`
+      );
+    }
+  }
+}
+for (const toolName of (projectsConfig.defaults?.disallowedTools ?? [])) {
+  if (!WRITE_TOOLS.has(toolName)) {
+    console.warn(
+      `[OverleafMCP] Warning: unknown tool "${toolName}" in defaults.disallowedTools. ` +
+      `Valid tools are: ${[...WRITE_TOOLS].join(', ')}`
+    );
+  }
+}
+
 // ─── In-process per-project mutex ────────────────────────────────────────────
 //
 // Serializes all git operations for a given project within this process.
@@ -102,33 +140,15 @@ function getProject(projectName) {
     client: new OverleafGitClient(project.projectId, project.gitToken, TEMP_DIR),
     projectId: project.projectId,
     resolvedName: projectName,
-    // readOnly defaults to false — omitting the field means the project is writable.
     readOnly: project.readOnly === true,
     disallowedTools,
   };
 }
 
-// ─── Write-tool registry ──────────────────────────────────────────────────────
-//
-// All tools that perform any write operation must be listed here.
-// The read-only guard checks this set centrally before the switch runs,
-// so adding a new write tool in a future branch only requires adding its name here.
-//
-const WRITE_TOOLS = new Set([
-  'write_file',
-  'write_section',
-  'str_replace',
-  'insert_before',
-  'insert_after',
-  'add_bib_entry',
-  'replace_bib_entry',
-  'remove_bib_entry',
-]);
-
 // ─── MCP server ───────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'overleaf-mcp-server', version: '2.0.0' },
+  { name: 'overleaf-mcp-server', version: '1.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -866,7 +886,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const files = await client.listFiles();
           const mainFile = files.find(f => f.includes('main.tex')) ?? files[0] ?? null;
           const sections = mainFile ? await client.getSections(mainFile) : [];
-          return { totalFiles: files.length, mainFile, totalSections: sections.length, files: files.slice(0, 10) };
+          return {
+            totalFiles: files.length,
+            mainFile,
+            totalSections: sections.length,
+            files,
+          };
         });
         return text(JSON.stringify(result, null, 2));
       }
