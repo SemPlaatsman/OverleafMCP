@@ -1,188 +1,198 @@
-# Overleaf MCP Server
+# OverleafMCP
 
-An MCP (Model Context Protocol) server that provides access to Overleaf projects via Git integration. This allows Claude and other MCP clients to read LaTeX files, analyze document structure, extract content, and write files from and to Overleaf projects.
+An MCP (Model Context Protocol) server that gives Claude direct access to Overleaf projects through Git integration. Read, write, and surgically edit LaTeX documents without leaving your conversation.
+
+---
 
 ## Features
 
-- 📄 **File Management**: List, read, and write files from and to Overleaf projects
-- 📋 **Document Structure**: Parse LaTeX sections and subsections
-- 🔍 **Content Extraction**: Extract specific sections by title
-- 📊 **Project Summary**: Get overview of project status and structure
-- 🏗️ **Multi-Project Support**: Manage multiple Overleaf projects
+- Read files, sections, and document structure from any configured Overleaf project
+- Write entire files or individual sections with automatic commit and push
+- Surgical edits via `str_replace`, `insert_before`, and `insert_after` (coming soon)
+- BibTeX entry management (coming soon)
+- Git history and diff inspection (coming soon)
+- In-process per-project locking: safe concurrent tool calls with no external dependencies
+- Dirty-state recovery: if the server crashes mid-write, staged changes are committed on next startup
+- Path traversal protection on all file operations
+- No Redis, no Docker required
+
+---
+
+## Requirements
+
+- Node.js >= 18
+- Git installed and available on `PATH`
+- An Overleaf account with Git integration enabled (Overleaf premium feature)
+
+---
 
 ## Installation
 
-1. Clone this repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+git clone https://github.com/SemPlaatsman/OverleafMCP.git
+cd OverleafMCP
+npm install
+cp projects.example.json projects.json
+```
 
-3. Set up your projects configuration:
-   ```bash
-   cp projects.example.json projects.json
-   ```
+Edit `projects.json` with your Overleaf credentials:
 
-4. Edit `projects.json` with your Overleaf credentials:
-   ```json
-   {
-     "projects": {
-       "default": {
-         "name": "My Paper",
-         "projectId": "YOUR_OVERLEAF_PROJECT_ID",
-         "gitToken": "YOUR_OVERLEAF_GIT_TOKEN"
-       }
-     }
-   }
-   ```
+```json
+{
+  "projects": {
+    "my-paper": {
+      "name": "My Paper",
+      "projectId": "YOUR_OVERLEAF_PROJECT_ID",
+      "gitToken": "YOUR_OVERLEAF_GIT_TOKEN"
+    }
+  }
+}
+```
 
-## Getting Overleaf Credentials
+### Getting your credentials
 
-1. **Git Token**: 
-   - Go to Overleaf Account Settings → Git Integration
-   - Click "Create Token"
+**Project ID:** Open your project in Overleaf. The ID is in the URL:
+`https://www.overleaf.com/project/[PROJECT_ID]`
 
-2. **Project ID**: 
-   - Open your Overleaf project
-   - Find it in the URL: `https://www.overleaf.com/project/[PROJECT_ID]`
+**Git token:** Go to Overleaf Account Settings, then Git Integration, then create a token.
+
+---
+
+## Configuration
+
+All options have sensible defaults and can be overridden with environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROJECTS_FILE` | `./projects.json` | Path to the projects config file |
+| `OVERLEAF_TEMP_DIR` | `./temp` | Directory for local git clones |
+| `OVERLEAF_GIT_AUTHOR_NAME` | (git global config) | Git author name for commits |
+| `OVERLEAF_GIT_AUTHOR_EMAIL` | (git global config) | Git author email for commits |
+
+Setting `OVERLEAF_GIT_AUTHOR_NAME` and `OVERLEAF_GIT_AUTHOR_EMAIL` is recommended on
+environments where git is not globally configured, otherwise commits will fail.
+
+---
 
 ## Claude Desktop Setup
 
 Add to your Claude Desktop configuration file:
 
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Linux**: `~/.config/claude/claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/claude/claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "overleaf": {
       "command": "node",
-      "args": [
-        "/path/to/OverleafMCP/overleaf-mcp-server.js"
-      ]
+      "args": ["/absolute/path/to/OverleafMCP/overleaf-mcp-server.js"],
+      "env": {
+        "OVERLEAF_GIT_AUTHOR_NAME": "Your Name",
+        "OVERLEAF_GIT_AUTHOR_EMAIL": "you@example.com"
+      }
     }
   }
 }
 ```
 
-Restart Claude Desktop after configuration.
+Restart Claude Desktop after saving the configuration.
+
+---
 
 ## Available Tools
 
 ### `list_projects`
-List all configured projects.
+List all configured Overleaf projects.
 
 ### `list_files`
-List files in a project (default: .tex files).
-- `extension`: File extension filter (optional)
-- `projectName`: Project identifier (optional, defaults to "default")
+List files in a project. Defaults to `.tex` files; pass `extension` to filter differently.
 
 ### `read_file`
-Read a specific file from the project.
-- `filePath`: Path to the file (required)
-- `projectName`: Project identifier (optional)
+Read a file's full contents.
 
 ### `get_sections`
-Get all sections from a LaTeX file.
-- `filePath`: Path to the LaTeX file (required)
-- `projectName`: Project identifier (optional)
+Get all sectioning commands from a `.tex` file as a flat list. Each entry includes its type
+(`section`, `subsection`, etc.), title, character offset, full content, and a 100-character
+preview. Supports all seven LaTeX levels including starred variants.
 
 ### `get_section_content`
-Get content of a specific section.
-- `filePath`: Path to the LaTeX file (required)
-- `sectionTitle`: Title of the section (required)
-- `projectName`: Project identifier (optional)
+Get the full content of a specific named section.
 
 ### `status_summary`
-Get a comprehensive project status summary.
-- `projectName`: Project identifier (optional)
+Get a high-level overview of a project: file count, main file, and section structure.
 
-### `write_full`
-Write the full content of a file to the project.
-- `filePath`: Path to the file (required)
-- `content`: Content to write to the file (required)
-- `commitMessage`: Commit message (required)
-- `projectName`: Project identifier (optional)
+### `write_file`
+Overwrite an entire file. Prefer `write_section` or `str_replace` for targeted edits.
+Supports `dryRun` (size check without writing) and `push: false` (commit locally only).
 
 ### `write_section`
-Write the content of a specific section to the project.
-- `filePath`: Path to the file (required)
-- `sectionTitle`: Title of the section (required)
-- `content`: Content to write to the section (required)
-- `commitMessage`: Commit message (required)
-- `projectName`: Project identifier (optional)
+Replace a single named section in a `.tex` file. Only the named section is replaced;
+the rest of the file is untouched. The boundary is level-aware. Supports `dryRun` and `push`.
 
-## Usage Examples
-
-```
-# List all projects
-Use the list_projects tool
-
-# Get project overview
-Use status_summary tool
-
-# Read main.tex file
-Use read_file with filePath: "main.tex"
-
-# Get Introduction section
-Use get_section_content with filePath: "main.tex" and sectionTitle: "Introduction"
-
-# List all sections in a file
-Use get_sections with filePath: "main.tex"
-
-# Write the full content of a file to the project
-Use write_full with filePath: "main.tex", content: "...", commitMessage: "..."
-
-# Write the content of a specific section to the project
-Use write_section with filePath: "main.tex", sectionTitle: "Introduction", content: "...", commitMessage: "..."
-```
+---
 
 ## Multi-Project Usage
 
-To work with multiple projects, add them to `projects.json`:
+Add multiple entries to `projects.json` and reference them by key in tool calls:
 
 ```json
 {
   "projects": {
-    "default": {
-      "name": "Main Paper",
-      "projectId": "project-id-1",
-      "gitToken": "token-1"
+    "active-paper": {
+      "name": "Current Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "readOnly": false
     },
-    "paper2": {
-      "name": "Second Paper", 
-      "projectId": "project-id-2",
-      "gitToken": "token-2"
+    "published-paper": {
+      "name": "Published Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "readOnly": true
     }
   }
 }
 ```
 
-Then specify the project in tool calls:
-```
-Use get_section_content with projectName: "paper2", filePath: "main.tex", sectionTitle: "Methods"
+Then pass `projectName: "active-paper"` in any tool call to target a specific project.
+
+### `projectName` selection behaviour
+
+- **Single project configured:** `projectName` can be omitted; the server resolves the project automatically.
+- **Multiple projects configured:** `projectName` must be supplied. If omitted, the server returns an error listing the available project keys. This is intentional: silently defaulting to the wrong project on a write operation would be worse than an explicit error.
+
+---
+
+## Read-only projects
+
+Any project can be marked read-only by setting `"readOnly": true` in `projects.json`:
+
+```json
+{
+  "projects": {
+    "my-project": {
+      "name": "My Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "readOnly": true
+    }
+  }
+}
 ```
 
-## File Structure
+Read-only projects allow all read operations (`read_file`, `get_sections`, `get_section_content`, etc.) but reject any write operation with a clear error message. The default is `false` (writable), so omitting the field has no effect.
 
-```
-OverleafMCP/
-├── overleaf-mcp-server.js    # Main MCP server
-├── overleaf-git-client.js    # Git client library
-├── projects.json             # Your project configuration (gitignored)
-├── projects.example.json     # Example configuration
-├── package.json              # Dependencies
-└── README.md                 # This file
-```
+---
 
-## Security Notes
+## Attribution
 
-- `projects.json` is gitignored to protect your credentials
-- Never commit real project IDs or Git tokens
-- Use the provided `projects.example.json` as a template
+See [ATTRIBUTION.md](./ATTRIBUTION.md) for credits to the open-source projects that
+informed this work.
+
+---
 
 ## License
 
-MIT License
+MIT. See [LICENSE](./LICENSE).
