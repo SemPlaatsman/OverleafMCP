@@ -1,6 +1,6 @@
 {
   "name": "overleaf-mcp-server",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MCP server for Overleaf integration",
   "type": "module",
   "main": "overleaf-mcp-server.js",
@@ -11,7 +11,7 @@
     "start": "node overleaf-mcp-server.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.21.0"
   },
   "engines": {
     "node": ">=18.0.0"
