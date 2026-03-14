@@ -110,6 +110,9 @@ const WRITE_TOOLS = new Set([
   'str_replace',
   'insert_before',
   'insert_after',
+  'add_bib_entry',
+  'replace_bib_entry',
+  'remove_bib_entry',
 ]);
 
 // ─── MCP server ───────────────────────────────────────────────────────────────
@@ -579,6 +582,153 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
+    {
+      name: 'get_bib_entry',
+      description:
+        'Get the raw BibTeX block for a single cite key from a .bib file. ' +
+        'Returns the full entry string including the @type{key, ...} wrapper. ' +
+        'Only applicable to .bib files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the .bib file',
+          },
+          citeKey: {
+            type: 'string',
+            description: 'The citation key to look up (e.g. "smith2024")',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'citeKey'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'add_bib_entry',
+      description:
+        'Append a new BibTeX entry to a .bib file. ' +
+        'The entry parameter must be a complete raw BibTeX string, e.g.: ' +
+        '@inproceedings{smith2024, author = {Smith, John}, title = {A Paper}, booktitle = {NeurIPS}, year = {2024}}. ' +
+        'Any valid BibTeX entry type is accepted (@article, @book, @inproceedings, @misc, etc.). ' +
+        'The cite key is extracted server-side — an error is returned if it already exists. ' +
+        'Only applicable to .bib files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the .bib file',
+          },
+          entry: {
+            type: 'string',
+            description: 'Complete raw BibTeX entry string including the @type{key, ...} wrapper',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Add bib entry via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, validate the entry and check for duplicate cite key without writing anything (optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'entry'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'replace_bib_entry',
+      description:
+        'Replace the BibTeX entry with the given cite key with a new raw BibTeX block. ' +
+        'The new entry may use a different cite key if desired. ' +
+        'Only applicable to .bib files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the .bib file',
+          },
+          citeKey: {
+            type: 'string',
+            description: 'The citation key of the entry to replace',
+          },
+          newEntry: {
+            type: 'string',
+            description: 'Complete replacement raw BibTeX entry string',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Update bib entry via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, verify the cite key exists without writing anything (optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'citeKey', 'newEntry'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'remove_bib_entry',
+      description:
+        'Remove the BibTeX entry with the given cite key from a .bib file. ' +
+        'Also removes the preceding blank line to keep the file tidy. ' +
+        'Only applicable to .bib files.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Path to the .bib file',
+          },
+          citeKey: {
+            type: 'string',
+            description: 'The citation key of the entry to remove',
+          },
+          commitMessage: {
+            type: 'string',
+            description: 'Git commit message (optional, defaults to "Remove bib entry via Overleaf MCP")',
+          },
+          push: {
+            type: 'boolean',
+            description: 'Whether to push to Overleaf after committing (optional, defaults to true)',
+          },
+          dryRun: {
+            type: 'boolean',
+            description: 'If true, verify the cite key exists without writing anything (optional, defaults to false)',
+          },
+          projectName: {
+            type: 'string',
+            description: 'Project identifier. Required when multiple projects are configured; can be omitted when exactly one project exists.',
+          },
+        },
+        required: ['filePath', 'citeKey'],
+        additionalProperties: false,
+      },
+    },
   ],
 }));
 
@@ -761,6 +911,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return text(formatWriteResult(result));
       }
 
+      case 'get_bib_entry': {
+        const entry = await withProjectLock(projectId, () =>
+          client.getBibEntry(args.filePath, args.citeKey)
+        );
+        if (!entry) {
+          throw new Error(`Cite key "${args.citeKey}" not found in "${args.filePath}".`);
+        }
+        return text(entry);
+      }
+
+      case 'add_bib_entry': {
+        const result = await withProjectLock(projectId, () =>
+          client.addBibEntry(args.filePath, args.entry, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
+      }
+
+      case 'replace_bib_entry': {
+        const result = await withProjectLock(projectId, () =>
+          client.replaceBibEntry(args.filePath, args.citeKey, args.newEntry, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
+      }
+
+      case 'remove_bib_entry': {
+        const result = await withProjectLock(projectId, () =>
+          client.removeBibEntry(args.filePath, args.citeKey, {
+            commitMessage: args.commitMessage,
+            push: args.push,
+            dryRun: args.dryRun,
+          })
+        );
+        return text(formatWriteResult(result));
+      }
+
       default:
         throw new Error(`Unknown tool: "${name}"`);
     }
@@ -783,6 +976,8 @@ function formatWriteResult(result) {
     if ('sectionFound' in result) lines.push(`Section found: ${result.sectionFound}`);
     if ('newContentSize' in result) lines.push(`New content size: ${result.newContentSize} characters`);
     if ('anchorIndex' in result) lines.push(`Anchor position: character ${result.anchorIndex}`);
+    if ('citeKey' in result) lines.push(`Cite key: ${result.citeKey}`);
+    if ('action' in result) lines.push(`Action: ${result.action}`);
     return lines.join('\n');
   }
   if (result?.message) return result.message;
