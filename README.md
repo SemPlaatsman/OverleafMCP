@@ -183,6 +183,9 @@ Add multiple entries to `projects.json` and reference them by key in tool calls:
 
 ```json
 {
+  "defaults": {
+    "disallowedTools": []
+  },
   "projects": {
     "active-paper": {
       "name": "Current Paper",
@@ -210,6 +213,49 @@ Then pass `projectName: "active-paper"` in any tool call to target a specific pr
 ### Read-only projects
 
 Setting `"readOnly": true` on a project allows all read operations but rejects any write operation with a clear error message. The default is `false`, so omitting the field has no effect. This is useful for protecting published or archived papers from accidental edits.
+
+### Fine-grained tool permissions
+
+For more selective control, use `disallowedTools` to block specific tools rather than all writes. This works at two levels.
+
+A `defaults` block at the top of `projects.json` sets the baseline for all projects:
+
+```json
+{
+  "defaults": {
+    "disallowedTools": ["write_file", "remove_bib_entry"]
+  },
+  "projects": {
+    "my-paper": {
+      "name": "My Paper",
+      "projectId": "...",
+      "gitToken": "..."
+    }
+  }
+}
+```
+
+A per-project `disallowedTools` array overrides the global defaults entirely for that project:
+
+```json
+{
+  "defaults": {
+    "disallowedTools": ["write_file"]
+  },
+  "projects": {
+    "my-paper": {
+      "name": "My Paper",
+      "projectId": "...",
+      "gitToken": "...",
+      "disallowedTools": []
+    }
+  }
+}
+```
+
+In this example the global default blocks `write_file`, but `my-paper` overrides it with an empty list, making all tools available.
+
+The resolution order is: `readOnly: true` (blocks all writes, takes precedence over everything) → per-project `disallowedTools` → global `defaults.disallowedTools`. Omitting `disallowedTools` at either level falls through to the next. The valid tool names are the same names used in tool calls: `write_file`, `write_section`, `str_replace`, `insert_before`, `insert_after`, `add_bib_entry`, `replace_bib_entry`, `remove_bib_entry`.
 
 ---
 
