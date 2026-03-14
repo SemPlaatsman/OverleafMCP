@@ -1,6 +1,14 @@
 # OverleafMCP
 
-An MCP (Model Context Protocol) server that gives Claude direct access to Overleaf projects through Git integration. Read, write, and surgically edit LaTeX documents and BibTeX bibliographies without leaving your conversation.
+![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![MCP](https://img.shields.io/badge/MCP-compatible-purple)
+
+> Give any MCP-compatible AI assistant direct access to your Overleaf projects.
+
+Overleaf has no public write API. The only programmatic access is through Git. OverleafMCP wraps that Git interface with 19 purpose-built tools, giving your AI assistant the ability to edit LaTeX documents the way a developer would: targeted replacements, not full-file rewrites.
+
+OverleafMCP implements the [Model Context Protocol](https://modelcontextprotocol.io) and is compatible with any MCP client. It has been primarily tested with Claude.
 
 ---
 
@@ -8,14 +16,25 @@ An MCP (Model Context Protocol) server that gives Claude direct access to Overle
 
 - Read files, document structure, preamble, postamble, and individual sections from any configured Overleaf project
 - Write entire files or replace individual sections with automatic commit and push
-- Surgical edits via `str_replace`, `insert_before`, and `insert_after` — no full-file rewrites needed
+- Surgical edits via `str_replace`, `insert_before`, and `insert_after`: no full-file rewrites needed
 - BibTeX entry management: get, add, replace, and remove individual entries by cite key
 - Git history and diff inspection
 - Per-project read-only mode to protect published or archived projects from accidental writes
+- Fine-grained tool permissions via `disallowedTools` at global and per-project level
 - In-process per-project locking: safe concurrent tool calls with no external dependencies
 - Dirty-state recovery: if the server crashes mid-write, staged changes are committed on next startup
 - Path traversal protection on all file operations
 - No Redis, no Docker required
+
+---
+
+## Why not just copy-paste into your AI assistant?
+
+You can, but you lose context window space, lose the ability to make targeted edits without rewriting whole files, and lose git history. OverleafMCP keeps your document in Overleaf, edits it in place, and commits every change with a message.
+
+## Compared to other Overleaf MCP servers
+
+Most existing implementations are read-only or only support full-file writes. OverleafMCP adds surgical edit tools (`str_replace`, `insert_before`, `insert_after`), BibTeX entry management, fine-grained per-project permissions, and dirty-state crash recovery.
 
 ---
 
@@ -75,13 +94,9 @@ Setting `OVERLEAF_GIT_AUTHOR_NAME` and `OVERLEAF_GIT_AUTHOR_EMAIL` is recommende
 
 ---
 
-## Claude Desktop Setup
+## MCP client setup
 
-Add to your Claude Desktop configuration file:
-
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-- **Linux:** `~/.config/claude/claude_desktop_config.json`
+OverleafMCP works with any MCP-compatible client. Add it to your client's configuration using the stdio transport:
 
 ```json
 {
@@ -98,7 +113,17 @@ Add to your Claude Desktop configuration file:
 }
 ```
 
-Restart Claude Desktop after saving the configuration.
+Configuration file locations for common clients:
+
+| Client | Configuration file |
+|---|---|
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Desktop (Linux) | `~/.config/claude/claude_desktop_config.json` |
+| Cursor | `.cursor/mcp.json` in your project or `~/.cursor/mcp.json` globally |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+
+Restart your client after saving the configuration.
 
 ---
 
@@ -109,7 +134,7 @@ Tools are grouped below by purpose. All write tools support an optional `commitM
 ### Project navigation
 
 **`list_projects`**
-List all configured projects, including their `readOnly` status.
+List all configured projects, including their `readOnly` status and `disallowedTools`.
 
 **`list_files`**
 List files in a project. Defaults to `.tex` files; pass `extension` to filter by a different extension (e.g. `".bib"`).
@@ -132,7 +157,7 @@ Get the full content of a specific named section. Supply the optional `parentTit
 Get everything before the first sectioning command: document class declaration, package imports, and custom command definitions. Returns the full file content if no sections exist. Only applicable to `.tex` files.
 
 **`get_postamble`**
-Get everything from `\end{document}` (inclusive) to the end of the file. Returns an empty string if `\end{document}` is absent (e.g. `\input`'d files). Note that bibliography commands (`\bibliography{}`, `\printbibliography`) appear before `\end{document}` and fall within the last section's content range — use `str_replace` to edit them. Only applicable to `.tex` files.
+Get everything from `\end{document}` (inclusive) to the end of the file. Returns an empty string if `\end{document}` is absent (e.g. `\input`'d files). Note: bibliography commands (`\bibliography{}`, `\printbibliography`) appear before `\end{document}` and fall within the last section's content range. Use `str_replace` to edit them. Only applicable to `.tex` files.
 
 ### Git inspection
 
@@ -151,7 +176,7 @@ Overwrite an entire file. Use for new file creation or full-file replacements on
 Replace a single named section in a `.tex` file. Only the named section is replaced; everything else is untouched. The boundary is level-aware: the section ends where the next command of equal or higher level begins, or at `\end{document}` if there is none. Only applicable to `.tex` files.
 
 **`str_replace`**
-Replace the single unique occurrence of `oldStr` with `newStr` in any file. `oldStr` must match exactly once — if it matches zero or multiple locations, an error is returned with the occurrence count so you can add more surrounding context to make it unambiguous. Setting `newStr` to an empty string deletes `oldStr`. This is the preferred tool for targeted edits anywhere in a file, including the preamble and bibliography commands.
+Replace the single unique occurrence of `oldStr` with `newStr` in any file. `oldStr` must match exactly once. If it matches zero or multiple locations, an error is returned with the occurrence count so you can add more surrounding context to make it unambiguous. Setting `newStr` to an empty string deletes `oldStr`. This is the preferred tool for targeted edits anywhere in a file, including the preamble and bibliography commands.
 
 **`insert_before`**
 Insert content immediately before the single unique occurrence of `anchorStr`. Same uniqueness rules as `str_replace`.
@@ -255,7 +280,7 @@ A per-project `disallowedTools` array overrides the global defaults entirely for
 
 In this example the global default blocks `write_file`, but `my-paper` overrides it with an empty list, making all tools available.
 
-The resolution order is: `readOnly: true` (blocks all writes, takes precedence over everything) → per-project `disallowedTools` → global `defaults.disallowedTools`. Omitting `disallowedTools` at either level falls through to the next. The valid tool names are the same names used in tool calls: `write_file`, `write_section`, `str_replace`, `insert_before`, `insert_after`, `add_bib_entry`, `replace_bib_entry`, `remove_bib_entry`.
+Resolution order: `readOnly: true` takes precedence over everything and blocks all write tools. Then per-project `disallowedTools` is checked. If absent, it falls through to `defaults.disallowedTools`. If that is also absent, all tools are allowed. The valid tool names are: `write_file`, `write_section`, `str_replace`, `insert_before`, `insert_after`, `add_bib_entry`, `replace_bib_entry`, `remove_bib_entry`.
 
 ---
 
