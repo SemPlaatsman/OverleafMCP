@@ -269,10 +269,185 @@ export class OverleafGitClient {
         return this._parseSections(content);
     }
 
-    /** Returns the section object for a given title, or null if not found. */
-    async getSection(filePath, sectionTitle) {
+    /**
+     * Builds a hierarchical section tree from a flat array produced by _parseSections.
+     * Each node gets a `children` array containing its direct descendants.
+     * The `content` field on each node is the text immediately following the heading,
+     * up to the next heading of any level — it does not include children's content.
+     * This gives the LLM a clean view of direct content vs. nested structure.
+     */
+    _buildSectionTree(flat) {
+        const root = [];
+        // Stack entries: { node, level }
+        // The top of the stack is always the current open ancestor.
+        const stack = [];
+
+        for (const entry of flat) {
+            const level = SECTION_LEVELS[entry.type] ?? 99;
+            const node = { ...entry, children: [] };
+
+            // Pop ancestors that are at the same or deeper level.
+            while (stack.length && stack[stack.length - 1].level >= level) {
+                stack.pop();
+            }
+
+            if (stack.length === 0) {
+                root.push(node);
+            } else {
+                stack[stack.length - 1].node.children.push(node);
+            }
+
+            stack.push({ node, level });
+        }
+
+        return root;
+    }
+
+    /** Returns a hierarchical section tree for the given .tex file. */
+    async getSectionTree(filePath) {
+        const flat = await this.getSections(filePath);
+        return this._buildSectionTree(flat);
+    }
+
+    /**
+     * Returns the section object for a given title, or null if not found.
+     *
+     * When parentTitle is supplied, only sections that fall within that parent's
+     * range are considered. This disambiguates documents where the same subsection
+     * title appears under multiple top-level sections.
+     */
+    async getSection(filePath, sectionTitle, parentTitle = null) {
         const sections = await this.getSections(filePath);
-        return sections.find(s => s.title === sectionTitle) ?? null;
+
+        if (!parentTitle) {
+            return sections.find(s => s.title === sectionTitle) ?? null;
+        }
+
+        const parent = sections.find(s => s.title === parentTitle);
+        if (!parent) return null;
+
+        // Determine the end of the parent's range: the next section of equal or
+        // higher level, or end of file if there is none.
+        const parentLevel = SECTION_LEVELS[parent.type] ?? 99;
+        const nextSameLevel = sections.find(
+            s => s.startIndex > parent.startIndex && (SECTION_LEVELS[s.type] ?? 99) <= parentLevel
+        );
+        const parentEnd = nextSameLevel ? nextSameLevel.startIndex : Infinity;
+
+        return sections.find(
+            s => s.title === sectionTitle &&
+                s.startIndex > parent.startIndex &&
+                s.startIndex < parentEnd
+        ) ?? null;
+    }
+
+    /**
+     * Returns everything before the first sectioning command in a .tex file.
+     * This is the document class declaration, package imports, and custom
+     * command definitions. Returns the full file content if no sections exist.
+     */
+    async getPreamble(filePath) {
+        const content = await this.readFile(filePath);
+        const sections = this._parseSections(content);
+        if (sections.length === 0) return content;
+        return content.slice(0, sections[0].startIndex);
+    }
+
+    /**
+     * Returns everything from \end{document} (inclusive) to the end of the file.
+     * In a standard .tex file this is \end{document} plus any trailing whitespace.
+     * Returns an empty string if \end{document} is not present (e.g. \input'd files).
+     *
+     * Note: bibliography commands (\bibliography{}, \bibliographystyle{},
+     * \printbibliography) typically appear before \end{document} and are therefore
+     * captured within the last section's content range. Use str_replace to edit them.
+     */
+    async getPostamble(filePath) {
+        const content = await this.readFile(filePath);
+        const endDocIdx = content.lastIndexOf('\\end{document}');
+        if (endDocIdx === -1) return '';
+        return content.slice(endDocIdx);
+    }
+
+    /**
+     * Returns recent git commits for the project, optionally filtered by file path
+     * and/or time range.
+     *
+     * Options:
+     *   limit     — maximum commits to return (default 20, max 200)
+     *   filePath  — restrict history to a single file path
+     *   since     — git --since filter, e.g. "2.weeks" or "2025-01-01"
+     *   until     — git --until filter
+     */
+    async listHistory({ limit = 20, filePath, since, until } = {}) {
+        await this.cloneOrPull();
+
+        const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 20));
+
+        // Use null-byte (\x00) between fields and SOH (\x01) between commits.
+        // This is safe regardless of commit message content.
+        const args = [
+            'log',
+            `--max-count=${safeLimit}`,
+            '--format=%x01%H%x00%as%x00%an%x00%s',
+        ];
+        if (since) args.push(`--since=${since}`);
+        if (until) args.push(`--until=${until}`);
+        if (filePath) args.push('--', filePath);
+
+        const { stdout } = await this._git(args);
+
+        return stdout
+            .split('\x01')
+            .filter(Boolean)
+            .map(block => {
+                const [hash, date, author, subject] = block.split('\x00');
+                return {
+                    hash: hash?.trim() ?? '',
+                    date: date?.trim() ?? '',
+                    author: author?.trim() ?? '',
+                    subject: subject?.trim() ?? '',
+                };
+            });
+    }
+
+    /**
+     * Returns a unified diff.
+     *
+     * Options:
+     *   fromRef       — base ref; omit for "working tree vs HEAD"
+     *   toRef         — target ref; omit for working tree
+     *   filePaths     — array of paths to restrict the diff to
+     *   contextLines  — lines of context around each hunk (default 3, max 10)
+     *   maxOutputChars — truncate output to this many characters (default 120 000)
+     *
+     * Returns { diff: string, truncated: boolean }.
+     */
+    async getDiff({ fromRef, toRef, filePaths = [], contextLines = 3, maxOutputChars = 120000 } = {}) {
+        await this.cloneOrPull();
+
+        const safeContext = Math.min(10, Math.max(0, Number.parseInt(contextLines, 10) || 3));
+        const args = ['diff', `--unified=${safeContext}`];
+
+        if (fromRef && toRef) {
+            args.push(fromRef, toRef);
+        } else if (fromRef) {
+            args.push(fromRef);
+        } else {
+            // Default: all changes since last commit (staged + unstaged vs HEAD).
+            args.push('HEAD');
+        }
+
+        if (filePaths.length) args.push('--', ...filePaths);
+
+        const { stdout } = await this._git(args);
+        const safMax = Math.max(2000, maxOutputChars);
+        const truncated = stdout.length > safMax;
+
+        return {
+            diff: truncated ? stdout.slice(0, safMax) : stdout,
+            truncated,
+        };
     }
 
     // ─── Public write API ────────────────────────────────────────────────────────
