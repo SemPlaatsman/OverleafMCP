@@ -3,6 +3,8 @@
 ![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![MCP](https://img.shields.io/badge/MCP-compatible-purple)
+![Unit Tests](https://github.com/SemPlaatsman/OverleafMCP/actions/workflows/unit-tests.yml/badge.svg)
+![Integration Tests](https://github.com/SemPlaatsman/OverleafMCP/actions/workflows/integration-tests.yml/badge.svg)
 
 > Give any MCP-compatible AI assistant direct access to your Overleaf projects.
 
@@ -281,6 +283,26 @@ A per-project `disallowedTools` array overrides the global defaults entirely for
 In this example the global default blocks `write_file`, but `my-paper` overrides it with an empty list, making all tools available.
 
 Resolution order: `readOnly: true` takes precedence over everything and blocks all write tools. Then per-project `disallowedTools` is checked. If absent, it falls through to `defaults.disallowedTools`. If that is also absent, all tools are allowed. The valid tool names are: `write_file`, `write_section`, `str_replace`, `insert_before`, `insert_after`, `add_bib_entry`, `replace_bib_entry`, `remove_bib_entry`.
+
+---
+
+## Testing
+
+OverleafMCP has a two-layer test suite built on Node.js's built-in `node:test` module — no extra test dependencies required.
+
+**Unit tests** cover pure logic: section and BibTeX parsing, path traversal protection, and anchor uniqueness. They run in under a second with no credentials or network access:
+
+```bash
+npm test
+```
+
+**Integration tests** run the full tool stack against a live Overleaf project via git, verifying every tool end-to-end including push verification via `listHistory`. They require a `projects.json` with writable and read-only test projects configured:
+
+```bash
+npm run test:integration
+```
+
+CI runs unit tests on every PR to `dev` and `main`. Integration tests run on PRs to `main` only.
 
 ---
 
