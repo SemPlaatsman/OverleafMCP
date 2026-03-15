@@ -17,6 +17,8 @@ const SECTION_LEVELS = {
     subparagraph: 6,
 };
 
+export const PREVIEW_MAX_LENGTH = 100;
+
 export class OverleafGitClient {
     constructor(projectId, gitToken, tempDir) {
         this.projectId = projectId;
@@ -238,7 +240,11 @@ export class OverleafGitClient {
 
     async readFile(filePath) {
         await this.cloneOrPull();
-        return fs.readFile(this._safePath(filePath), 'utf-8');
+        const content = await fs.readFile(this._safePath(filePath), 'utf-8');
+        // Normalise Windows-style CRLF to LF. Overleaf's git server uses CRLF on
+        // some projects. Without this, str_replace and insert_before/after anchors
+        // constructed with LF would fail to match even when visually identical.
+        return content.replace(/\r\n/g, '\n');
     }
 
     /**
@@ -271,7 +277,7 @@ export class OverleafGitClient {
             const contentStart = entry._cmdEndIndex;
             const contentEnd = i + 1 < flat.length ? flat[i + 1].startIndex : content.length;
             entry.content = content.substring(contentStart, contentEnd).trim();
-            entry.preview = entry.content.substring(0, 100).replace(/\s+/g, ' ');
+            entry.preview = entry.content.substring(0, PREVIEW_MAX_LENGTH).replace(/\s+/g, ' ');
             delete entry._cmdEndIndex;
         });
 
