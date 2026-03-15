@@ -363,6 +363,16 @@ describe('_findUniqueAnchor', () => {
     );
   });
 
+  test('overlapping occurrences are each counted: "aa" in "aaa" is 2 by contract', () => {
+    // The contract specifies strict counting: each position where the anchor
+    // starts is counted independently, including overlapping positions.
+    // "aa" starts at index 0 and index 1 in "aaa", so the count is 2.
+    assert.throws(
+      () => tracked._findUniqueAnchor('aaa', 'aa'),
+      /matches 2 locations/
+    );
+  });
+
   test('match count in error message is accurate', () => {
     let errorMessage = '';
     try {
