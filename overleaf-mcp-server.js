@@ -26,14 +26,6 @@ const TEMP_DIR = process.env.OVERLEAF_TEMP_DIR
   : path.join(__dirname, 'temp');
 
 let projectsConfig;
-try {
-  const raw = await readFile(PROJECTS_FILE, 'utf-8');
-  projectsConfig = JSON.parse(raw);
-} catch (err) {
-  console.error(`[OverleafMCP] Failed to load projects config from "${PROJECTS_FILE}": ${err.message}`);
-  console.error('[OverleafMCP] Please create projects.json from projects.example.json');
-  process.exit(1);
-}
 
 // ─── Write-tool registry ──────────────────────────────────────────────────────
 //
@@ -51,27 +43,6 @@ const WRITE_TOOLS = new Set([
   'replace_bib_entry',
   'remove_bib_entry',
 ]);
-
-// Validate disallowedTools entries at startup so typos surface immediately
-// rather than silently doing nothing at runtime.
-for (const [key, project] of Object.entries(projectsConfig.projects ?? {})) {
-  for (const toolName of (project.disallowedTools ?? [])) {
-    if (!WRITE_TOOLS.has(toolName)) {
-      console.warn(
-        `[OverleafMCP] Warning: unknown tool "${toolName}" in disallowedTools for project "${key}". ` +
-        `Valid tools are: ${[...WRITE_TOOLS].join(', ')}`
-      );
-    }
-  }
-}
-for (const toolName of (projectsConfig.defaults?.disallowedTools ?? [])) {
-  if (!WRITE_TOOLS.has(toolName)) {
-    console.warn(
-      `[OverleafMCP] Warning: unknown tool "${toolName}" in defaults.disallowedTools. ` +
-      `Valid tools are: ${[...WRITE_TOOLS].join(', ')}`
-    );
-  }
-}
 
 // ─── In-process per-project mutex ────────────────────────────────────────────
 //
@@ -1041,7 +1012,39 @@ async function main() {
   console.error('[OverleafMCP] Server running on stdio');
 }
 
-main().catch(err => {
-  console.error('[OverleafMCP] Fatal error:', err);
-  process.exit(1);
-});
+// This code is only executed when running the server as a script, not when
+// importing it as a module.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    const raw = await readFile(PROJECTS_FILE, 'utf-8');
+    projectsConfig = JSON.parse(raw);
+  } catch (err) {
+    console.error(`[OverleafMCP] Failed to load projects config from "${PROJECTS_FILE}": ${err.message}`);
+    console.error('[OverleafMCP] Please create projects.json from projects.example.json');
+    process.exit(1);
+  }
+
+  for (const [key, project] of Object.entries(projectsConfig.projects ?? {})) {
+    for (const toolName of (project.disallowedTools ?? [])) {
+      if (!WRITE_TOOLS.has(toolName)) {
+        console.warn(
+          `[OverleafMCP] Warning: unknown tool "${toolName}" in disallowedTools for project "${key}". ` +
+          `Valid tools are: ${[...WRITE_TOOLS].join(', ')}`
+        );
+      }
+    }
+  }
+  for (const toolName of (projectsConfig.defaults?.disallowedTools ?? [])) {
+    if (!WRITE_TOOLS.has(toolName)) {
+      console.warn(
+        `[OverleafMCP] Warning: unknown tool "${toolName}" in defaults.disallowedTools. ` +
+        `Valid tools are: ${[...WRITE_TOOLS].join(', ')}`
+      );
+    }
+  }
+
+  main().catch(err => {
+    console.error('[OverleafMCP] Fatal error:', err);
+    process.exit(1);
+  });
+}
