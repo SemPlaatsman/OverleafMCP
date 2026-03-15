@@ -8,7 +8,10 @@
     "overleaf-mcp": "./overleaf-mcp-server.js"
   },
   "scripts": {
-    "start": "node overleaf-mcp-server.js"
+    "start": "node overleaf-mcp-server.js",
+    "test": "node --test test/unit.test.js",
+    "test:unit": "node --test test/unit.test.js",
+    "test:integration": "node --test test/integration.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.0"

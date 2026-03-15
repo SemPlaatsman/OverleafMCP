@@ -1,0 +1,45 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # remove after initial CI validation
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      OVERLEAF_GIT_AUTHOR_NAME: OverleafMCP CI
+      OVERLEAF_GIT_AUTHOR_EMAIL: ci@overleafmcp.test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Write projects.json from secrets
+        run: |
+          cat > projects.json << 'EOF'
+          {
+            "projects": {
+              "example_project": {
+                "name": "Example Project",
+                "projectId": "${{ secrets.EXAMPLE_PROJECT_ID }}",
+                "gitToken": "${{ secrets.EXAMPLE_PROJECT_TOKEN }}",
+                "readOnly": false
+              },
+              "readonly_example_project": {
+                "name": "ReadOnly Example Project",
+                "projectId": "${{ secrets.READONLY_PROJECT_ID }}",
+                "gitToken": "${{ secrets.READONLY_PROJECT_TOKEN }}",
+                "readOnly": true
+              }
+            }
+          }
+          EOF
+      - name: Run integration tests
+        run: node --test test/integration.test.js
+      - name: Restore test files on failure
+        if: failure()
+        run: node test/restore.js
