@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { OverleafGitClient, PREVIEW_MAX_LENGTH } from '../overleaf-git-client.js';
 import { TOOL_NAMES, getProject } from '../overleaf-mcp-server.js';
+import { withRetry } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -64,27 +65,8 @@ const FIXTURE_BIB = `@article{fixture2024,
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-async function withRetry(fn, { attempts = 3, delayMs = 5000 } = {}) {
-  let lastErr;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      const isTransient =
-        err.message?.includes('403') ||
-        err.message?.includes('502') ||
-        err.message?.includes('504') ||
-        err.message?.includes('unable to access') ||
-        err.message?.includes('timed out');
-      if (!isTransient || i === attempts - 1) throw err;
-      await new Promise(r => setTimeout(r, delayMs * (i + 1)));
-    }
-  }
-  throw lastErr;
-}
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const INTER_GROUP_DELAY_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Tool coverage tracking
@@ -177,7 +159,7 @@ describe('Group 1: Project navigation', () => {
 // Group 2: LaTeX read tools (against test_fixture.tex)
 // ---------------------------------------------------------------------------
 describe('Group 2: LaTeX read tools', () => {
-  before(() => sleep(3000));
+  before(() => sleep(INTER_GROUP_DELAY_MS));
 
   test('2.1 readFile: content matches known initial fixture content exactly', async () => {
     testedTools.add('read_file');
@@ -293,7 +275,7 @@ describe('Group 2: LaTeX read tools', () => {
 // Group 3: Git inspection
 // ---------------------------------------------------------------------------
 describe('Group 3: Git inspection', () => {
-  before(() => sleep(3000));
+  before(() => sleep(INTER_GROUP_DELAY_MS));
 
   test('3.1 listHistory: default returns commits with hash, date, author, subject fields', async () => {
     testedTools.add('list_history');
@@ -374,7 +356,7 @@ describe('Group 3: Git inspection', () => {
 // Group 4: Write tools — dryRun (no actual writes)
 // ---------------------------------------------------------------------------
 describe('Group 4: Write tools — dryRun', () => {
-  before(() => sleep(3000));
+  before(() => sleep(INTER_GROUP_DELAY_MS));
 
   test('4.1 writeFile dryRun: returns { dryRun: true, existingSize, newSize } with existingSize > 0', async () => {
     testedTools.add('write_file');
@@ -522,7 +504,7 @@ describe('Group 4: Write tools — dryRun', () => {
 //   Before 5.8 the fixture is restored again (push:false, bundled into 5.8).
 // ---------------------------------------------------------------------------
 describe('Group 5: Write tools — actual writes', () => {
-  before(() => sleep(3000));
+  before(() => sleep(INTER_GROUP_DELAY_MS));
 
   test('5.1 writeFile: replace test_fixture.tex content (push:true)', async () => {
     testedTools.add('write_file');
@@ -768,7 +750,7 @@ describe('Group 5: Write tools — actual writes', () => {
 // ---------------------------------------------------------------------------
 describe('Group 6: Write tool error paths', () => {
   before(async () => {
-    await sleep(3000);
+    await sleep(INTER_GROUP_DELAY_MS);
     // Restore fixture to known state — push:false so no extra push budget consumed
     await withRetry(() =>
       exClient.writeFile('test_fixture.tex', FIXTURE_TEX, {
@@ -861,7 +843,7 @@ describe('Group 6: Write tool error paths', () => {
 //   7.11: []                                         (push:true — also pushes 7.10)
 // ---------------------------------------------------------------------------
 describe('Group 7: BibTeX tools', () => {
-  before(() => sleep(3000));
+  before(() => sleep(INTER_GROUP_DELAY_MS));
 
   test('7.1 getBibEntry: existing key "fixture2024" returns raw BibTeX with nested braces intact', async () => {
     testedTools.add('get_bib_entry');
@@ -1040,7 +1022,7 @@ describe('Group 7: BibTeX tools', () => {
 // equivalent.
 // ---------------------------------------------------------------------------
 describe('Group 8: Permission guard', () => {
-  before(() => sleep(3000));
+  before(() => sleep(INTER_GROUP_DELAY_MS));
 
   const WRITE_TOOL_NAMES = [
     'write_file', 'write_section', 'str_replace',

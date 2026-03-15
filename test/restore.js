@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { OverleafGitClient } from '../overleaf-git-client.js';
+import { withRetry } from './helpers.js';
 
 const TEMP_DIR = process.env.OVERLEAF_TEMP_DIR
   ? path.resolve(process.cwd(), process.env.OVERLEAF_TEMP_DIR)
@@ -45,16 +46,16 @@ try {
   const client = new OverleafGitClient(projectId, gitToken, path.join(TEMP_DIR, 'integration'));
 
   console.error('[restore] Restoring test_fixture.tex...');
-  await client.writeFile('test_fixture.tex', FIXTURE_TEX, {
+  await withRetry(() => client.writeFile('test_fixture.tex', FIXTURE_TEX, {
     push: true,
     commitMessage: 'test: restore test_fixture.tex to known state',
-  });
+  }));
 
   console.error('[restore] Restoring test_fixture.bib...');
-  await client.writeFile('test_fixture.bib', FIXTURE_BIB, {
+  await withRetry(() => client.writeFile('test_fixture.bib', FIXTURE_BIB, {
     push: true,
     commitMessage: 'test: restore test_fixture.bib to known state',
-  });
+  }));
 
   console.error('[restore] Done.');
   process.exit(0);
