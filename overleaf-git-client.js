@@ -17,6 +17,8 @@ const SECTION_LEVELS = {
     subparagraph: 6,
 };
 
+export const PREVIEW_MAX_LENGTH = 100;
+
 export class OverleafGitClient {
     constructor(projectId, gitToken, tempDir) {
         this.projectId = projectId;
@@ -275,7 +277,7 @@ export class OverleafGitClient {
             const contentStart = entry._cmdEndIndex;
             const contentEnd = i + 1 < flat.length ? flat[i + 1].startIndex : content.length;
             entry.content = content.substring(contentStart, contentEnd).trim();
-            entry.preview = entry.content.substring(0, 100).replace(/\s+/g, ' ');
+            entry.preview = entry.content.substring(0, PREVIEW_MAX_LENGTH).replace(/\s+/g, ' ');
             delete entry._cmdEndIndex;
         });
 
