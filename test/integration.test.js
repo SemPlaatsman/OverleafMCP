@@ -66,6 +66,8 @@ const FIXTURE_BIB = `@article{fixture2024,
 // Helpers
 // ---------------------------------------------------------------------------
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Pause between test groups to avoid Overleaf git rate limiting.
+// Increase this value if you see transient 403 errors at the start of a group.
 const INTER_GROUP_DELAY_MS = 5000;
 
 // ---------------------------------------------------------------------------

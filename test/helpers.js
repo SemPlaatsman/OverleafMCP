@@ -1,5 +1,8 @@
 // Shared test helpers for integration tests and restore script.
 
+// Retries a function on transient Overleaf git errors (403, 5xx, network timeouts).
+// If sustained rate limiting causes repeated failures, increase `attempts` or `delayMs`.
+// Current window: attempts=5, delays of 5s/10s/15s/20s (~50s total).
 export async function withRetry(fn, { attempts = 5, delayMs = 5000 } = {}) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
