@@ -69,8 +69,8 @@ async function withProjectLock(projectId, fn) {
 
 // ─── Project resolution ───────────────────────────────────────────────────────
 
-function getProject(projectName) {
-  const projects = projectsConfig.projects ?? {};
+function getProject(projectName, config = projectsConfig) {
+  const projects = config.projects ?? {};
   const keys = Object.keys(projects);
 
   if (keys.length === 0) {
@@ -101,7 +101,7 @@ function getProject(projectName) {
   // Resolve disallowedTools: per-project list takes precedence over the global
   // defaults block. readOnly: true is a shorthand for disallowing all write tools
   // and takes precedence over everything else.
-  const globalDefaults = projectsConfig.defaults?.disallowedTools ?? [];
+  const globalDefaults = config.defaults?.disallowedTools ?? [];
   const projectDisallowed = project.disallowedTools ?? globalDefaults;
   const disallowedTools = new Set(
     project.readOnly === true ? [...WRITE_TOOLS] : projectDisallowed
@@ -739,6 +739,7 @@ const TOOLS = [
 // maintaining a separate hardcoded list. Adding a tool to TOOLS above
 // automatically makes it required in the integration test suite.
 export const TOOL_NAMES = new Set(TOOLS.map(t => t.name));
+export { getProject };
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
