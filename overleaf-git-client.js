@@ -305,7 +305,8 @@ export class OverleafGitClient {
 
         for (const entry of flat) {
             const level = SECTION_LEVELS[entry.type] ?? 99;
-            const node = { ...entry, children: [] };
+            const { content: _content, ...rest } = entry;
+            const node = { ...rest, children: [] };
 
             // Pop ancestors that are at the same or deeper level.
             while (stack.length && stack[stack.length - 1].level >= level) {

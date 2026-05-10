@@ -180,10 +180,10 @@ const TOOLS = [
     name: 'get_sections',
     description:
       'Get all sections from a .tex file as a hierarchical tree. Each node includes ' +
-      'its type (section, subsection, etc.), title, character offset, the text content ' +
-      'immediately following that heading (not including children), a 100-character ' +
-      'preview, and a children array of nested sections. Use this for document structure ' +
-      'overview and to identify which section to read or edit next. ' +
+      'its type (section, subsection, etc.), title, character offset, a 100-character ' +
+      'preview of the section body (whitespace-collapsed), and a children array of nested ' +
+      'sections. Use this for document structure overview and to identify which section to ' +
+      'read or edit next. To get full section text, call get_section_content. ' +
       'Only applicable to .tex files.',
     inputSchema: {
       type: 'object',
