@@ -216,6 +216,15 @@ describe('_buildSectionTree', () => {
     assert.equal(tree[1].title, 'Second');
     assert.deepEqual(tree[1].children, []);
   });
+
+  test('tree nodes omit content field but retain preview', () => {
+    const input = '\\section{A}\nsome long content here\n\\subsection{B}\nmore content';
+    const tree = tracked._buildSectionTree(tracked._parseSections(input));
+    assert.equal('content' in tree[0], false, 'root node should not have content field');
+    assert.equal('content' in tree[0].children[0], false, 'child node should not have content field');
+    assert.ok('preview' in tree[0], 'root node should retain preview field');
+    assert.ok('preview' in tree[0].children[0], 'child node should retain preview field');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -419,6 +428,7 @@ describe('coverage registration (I/O methods)', () => {
     '_git',
     '_commitAndPush',
     '_recoverDirtyState',
+    '_readRaw',
     'getSectionTree',
   ];
 

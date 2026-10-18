@@ -305,7 +305,8 @@ export class OverleafGitClient {
 
         for (const entry of flat) {
             const level = SECTION_LEVELS[entry.type] ?? 99;
-            const node = { ...entry, children: [] };
+            const { content: _content, ...rest } = entry;
+            const node = { ...rest, children: [] };
 
             // Pop ancestors that are at the same or deeper level.
             while (stack.length && stack[stack.length - 1].level >= level) {
@@ -474,6 +475,17 @@ export class OverleafGitClient {
     // ─── Public write API ────────────────────────────────────────────────────────
 
     /**
+     * Reads a file from an absolute path and normalises CRLF to LF.
+     * Used by all write methods after cloneOrPull() has already been called,
+     * so they share the same line-ending contract as the public readFile() API
+     * without triggering a second cloneOrPull().
+     */
+    async _readRaw(fullPath) {
+        const content = await fs.readFile(fullPath, 'utf-8');
+        return content.replace(/\r\n/g, '\n');
+    }
+
+    /**
      * Internal helper shared by strReplace, insertBefore, and insertAfter.
      * Finds the single occurrence of anchorStr in content and returns its index.
      *
@@ -563,7 +575,7 @@ export class OverleafGitClient {
 
         // Read the file once and parse from the same string — no second cloneOrPull,
         // no risk of section offsets being computed from a newer version of the file.
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
         const sections = this._parseSections(fileContent);
 
         const target = sections.find(s => s.title === sectionTitle);
@@ -606,7 +618,7 @@ export class OverleafGitClient {
     } = {}) {
         await this.cloneOrPull();
         const fullPath = this._safePath(filePath);
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
 
         const idx = this._findUniqueAnchor(fileContent, oldStr, 'oldStr');
         const updated = fileContent.slice(0, idx) + newStr + fileContent.slice(idx + oldStr.length);
@@ -639,7 +651,7 @@ export class OverleafGitClient {
     } = {}) {
         await this.cloneOrPull();
         const fullPath = this._safePath(filePath);
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
 
         const idx = this._findUniqueAnchor(fileContent, anchorStr, 'anchorStr');
         const updated = fileContent.slice(0, idx) + newContent + fileContent.slice(idx);
@@ -667,7 +679,7 @@ export class OverleafGitClient {
     } = {}) {
         await this.cloneOrPull();
         const fullPath = this._safePath(filePath);
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
 
         const idx = this._findUniqueAnchor(fileContent, anchorStr, 'anchorStr');
         const updated = fileContent.slice(0, idx + anchorStr.length) + newContent + fileContent.slice(idx + anchorStr.length);
@@ -769,7 +781,7 @@ export class OverleafGitClient {
     } = {}) {
         await this.cloneOrPull();
         const fullPath = this._safePath(filePath);
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
         const entries = this._parseBibEntries(fileContent);
 
         // Extract the cite key from the new entry.
@@ -810,7 +822,7 @@ export class OverleafGitClient {
     } = {}) {
         await this.cloneOrPull();
         const fullPath = this._safePath(filePath);
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
         const entries = this._parseBibEntries(fileContent);
 
         const target = entries.find(e => e.citeKey === citeKey);
@@ -845,7 +857,7 @@ export class OverleafGitClient {
     } = {}) {
         await this.cloneOrPull();
         const fullPath = this._safePath(filePath);
-        const fileContent = await fs.readFile(fullPath, 'utf-8');
+        const fileContent = await this._readRaw(fullPath);
         const entries = this._parseBibEntries(fileContent);
 
         const target = entries.find(e => e.citeKey === citeKey);
