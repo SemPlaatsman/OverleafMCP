@@ -12,6 +12,9 @@ Overleaf has no public write API. The only programmatic access is through Git. O
 
 OverleafMCP implements the [Model Context Protocol](https://modelcontextprotocol.io) and is compatible with any MCP client. It has been primarily tested with Claude.
 
+> [!NOTE]
+> **Status: work in progress.** Version 1 is in daily use for my own LaTeX reports. Some tested features do not yet work reliably in every case (for example, user experience and usability for LLMs still needs improvements in finding the right tools for the right task). Version 2 is in development, adding improved LLM UX, Git universality, drift detection, search, word count, compile tools, and more.
+
 ---
 
 ## Features
