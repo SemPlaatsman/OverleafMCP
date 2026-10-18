@@ -180,34 +180,34 @@ describe('Group 2: LaTeX read tools', () => {
     assert.equal(tree[1].children.length, 0, 'Beta should have no children');
   });
 
-  test('2.3 getSections: content fields match fixture text', async () => {
+  test('2.3 getSections: preview fields match fixture text and content is omitted', async () => {
     testedTools.add('get_sections');
     const tree = await withRetry(() => exClient.getSectionTree('test_fixture.tex'));
     assert.ok(
-      tree[0].content.includes('Alpha section content.'),
-      `Alpha content: "${tree[0].content}"`
+      tree[0].preview.includes('Alpha section content.'),
+      `Alpha preview: "${tree[0].preview}"`
     );
     assert.ok(
-      tree[0].children[0].content.includes('Alpha subsection content.'),
-      `Alpha Sub content: "${tree[0].children[0].content}"`
+      tree[0].children[0].preview.includes('Alpha subsection content.'),
+      `Alpha Sub preview: "${tree[0].children[0].preview}"`
     );
+    assert.equal('content' in tree[0], false, 'tree nodes should not include content');
   });
 
-  test('2.4 getSections: preview is within PREVIEW_MAX_LENGTH and non-empty for sections with content', async () => {
+  test('2.4 getSections: preview is within PREVIEW_MAX_LENGTH and non-empty for every fixture section', async () => {
     testedTools.add('get_sections');
     const tree = await withRetry(() => exClient.getSectionTree('test_fixture.tex'));
+    // Every section in FIXTURE_TEX has body text, so every preview must be non-empty.
     const allNodes = [tree[0], tree[0].children[0], tree[1]];
     for (const node of allNodes) {
       assert.ok(
         node.preview.length <= PREVIEW_MAX_LENGTH,
         `${node.title}: preview length ${node.preview.length} > ${PREVIEW_MAX_LENGTH}`
       );
-      if (node.content.trim().length > 0) {
-        assert.ok(
-          node.preview.length > 0,
-          `${node.title}: expected non-empty preview for non-empty content`
-        );
-      }
+      assert.ok(
+        node.preview.trim().length > 0,
+        `${node.title}: expected non-empty preview`
+      );
     }
   });
 
