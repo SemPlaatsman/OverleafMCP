@@ -10,7 +10,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { OverleafGitClient } from './overleaf-git-client.js';
+import { OverleafGitClient, redactSecrets, SECTION_SCOPES } from './overleaf-git-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -204,9 +204,16 @@ const TOOLS = [
   {
     name: 'get_section_content',
     description:
-      'Get the full content of a specific section in a .tex file. ' +
-      'If the same section title appears under multiple parent sections, supply ' +
-      'parentTitle to disambiguate. Only applicable to .tex files.',
+      'Get the text of one section in a .tex file, starting with its heading line. ' +
+      'By default (scope "own") this is the heading and the text up to the next heading ' +
+      'of any level, so nested subsections are not included; read them by their own titles, ' +
+      'or pass scope "full" to get the section together with all its subsections. ' +
+      'The text returned is exactly what write_section replaces when called with the same ' +
+      'sectionTitle, parentTitle and scope. ' +
+      'The last section stops before bibliography commands, acknowledgements and ' +
+      '\\end{document}; use get_postamble for those. ' +
+      'If the title occurs more than once in the file the call fails and lists the ' +
+      'matches; supply parentTitle to select one. Only applicable to .tex files.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -221,8 +228,15 @@ const TOOLS = [
         parentTitle: {
           type: 'string',
           description:
-            'Title of the parent section, used to disambiguate when the same ' +
-            'sectionTitle appears under multiple parents (optional)',
+            'Title of a section that contains the target, used to select one when the same ' +
+            'sectionTitle appears more than once (optional)',
+        },
+        scope: {
+          type: 'string',
+          enum: SECTION_SCOPES,
+          description:
+            '"own" (default): the heading and its own text, without nested subsections. ' +
+            '"full": the heading, its text and all nested subsections.',
         },
         projectName: {
           type: 'string',
@@ -259,11 +273,12 @@ const TOOLS = [
   {
     name: 'get_postamble',
     description:
-      'Get everything from \\end{document} (inclusive) to the end of the file. ' +
-      'Returns an empty string if \\end{document} is absent (e.g. \\input\'d files). ' +
-      'Note: bibliography commands (\\bibliography{}, \\bibliographystyle{}, ' +
-      '\\printbibliography) appear before \\end{document} and are part of the last ' +
-      "section's content range — use str_replace to edit them. " +
+      'Get the closing part of a .tex file that follows the last section: bibliography ' +
+      'commands (\\bibliographystyle{}, \\bibliography{}, \\printbibliography), an ' +
+      'acknowledgements block or \\appendix if present, and \\end{document}, through to ' +
+      'the end of the file. This text belongs to no section, so write_section never ' +
+      'changes it; use str_replace to edit it. ' +
+      'Returns an empty string if the file has none of these (e.g. \\input\'d files). ' +
       'Only applicable to .tex files.',
     inputSchema: {
       type: 'object',
@@ -409,11 +424,17 @@ const TOOLS = [
   {
     name: 'write_section',
     description:
-      'Replace a single named section in a .tex file and optionally push to Overleaf. ' +
-      'Only the named section is replaced; the rest of the file is untouched. ' +
-      'The boundary is level-aware: the section ends where the next command of equal or ' +
-      'higher level begins, or at \\end{document} if there is none. ' +
-      'Only applicable to .tex files.',
+      'Replace one named section in a .tex file and optionally push to Overleaf. ' +
+      'The text replaced is exactly what get_section_content returns for the same ' +
+      'sectionTitle, parentTitle and scope, heading line included, so newContent must ' +
+      'begin with the section heading. ' +
+      'By default (scope "own") only the heading and the section\'s own text are replaced ' +
+      'and nested subsections stay as they are. With scope "full" the nested subsections ' +
+      'are replaced as well: anything not repeated in newContent is removed. ' +
+      'Bibliography commands, acknowledgements and \\end{document} after the last section ' +
+      'are never part of a section and are left untouched. ' +
+      'If the title occurs more than once in the file the call fails and lists the ' +
+      'matches; supply parentTitle to select one. Only applicable to .tex files.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -425,9 +446,22 @@ const TOOLS = [
           type: 'string',
           description: 'Title of the section to replace (must match exactly)',
         },
+        parentTitle: {
+          type: 'string',
+          description:
+            'Title of a section that contains the target, used to select one when the same ' +
+            'sectionTitle appears more than once (optional)',
+        },
+        scope: {
+          type: 'string',
+          enum: SECTION_SCOPES,
+          description:
+            '"own" (default): replace the heading and the section\'s own text; nested ' +
+            'subsections are kept. "full": replace the heading, its text and all nested subsections.',
+        },
         newContent: {
           type: 'string',
-          description: 'Replacement content for the section, including the section heading',
+          description: 'Replacement text for the section, beginning with its heading line',
         },
         commitMessage: {
           type: 'string',
@@ -439,7 +473,9 @@ const TOOLS = [
         },
         dryRun: {
           type: 'boolean',
-          description: 'If true, verify the section exists and return its size without writing anything',
+          description:
+            'If true, verify the section exists and report the size of the text that would be ' +
+            'replaced and of newContent, without writing anything (optional, defaults to false)',
         },
         projectName: {
           type: 'string',
@@ -802,13 +838,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_section_content': {
         const section = await withProjectLock(projectId, () =>
-          client.getSection(args.filePath, args.sectionTitle, args.parentTitle ?? null)
+          client.getSection(args.filePath, args.sectionTitle, args.parentTitle ?? null, {
+            scope: args.scope ?? 'own',
+          })
         );
         if (!section) {
-          const hint = args.parentTitle
-            ? ` under parent "${args.parentTitle}"`
-            : ' (consider supplying parentTitle if the title appears under multiple sections)';
-          throw new Error(`Section "${args.sectionTitle}" not found in "${args.filePath}"${hint}`);
+          const where = args.parentTitle ? ` under parent "${args.parentTitle}"` : '';
+          throw new Error(
+            `Section "${args.sectionTitle}" not found in "${args.filePath}"${where}. ` +
+            'Titles must match exactly; use get_sections to list them.'
+          );
         }
         return text(section.content);
       }
@@ -894,6 +933,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             commitMessage: args.commitMessage,
             push: args.push,
             dryRun: args.dryRun,
+            parentTitle: args.parentTitle ?? null,
+            scope: args.scope ?? 'own',
           })
         );
         return text(formatWriteResult(result));
@@ -979,7 +1020,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: "${name}"`);
     }
   } catch (err) {
-    return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+    // Whatever went wrong, no git token may reach the model. The client already
+    // removes its own token from git errors; this covers every configured
+    // project and any error raised outside the client.
+    const message = redactSecrets(String(err?.message ?? err), configuredSecrets());
+    return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
   }
 });
 
@@ -989,12 +1034,21 @@ function text(str) {
   return { content: [{ type: 'text', text: str }] };
 }
 
+/** Every git token in the loaded configuration, for redaction of error text. */
+function configuredSecrets(config = projectsConfig) {
+  return Object.values(config?.projects ?? {})
+    .map(project => project?.gitToken)
+    .filter(Boolean);
+}
+
 function formatWriteResult(result) {
   if (result?.dryRun) {
     const lines = ['Dry run: no changes written.'];
     if ('existingSize' in result) lines.push(`Existing file size: ${result.existingSize} characters`);
     if ('newSize' in result) lines.push(`New content size:   ${result.newSize} characters`);
     if ('sectionFound' in result) lines.push(`Section found: ${result.sectionFound}`);
+    if ('scope' in result) lines.push(`Scope: ${result.scope}`);
+    if ('replacedSize' in result) lines.push(`Text that would be replaced: ${result.replacedSize} characters`);
     if ('newContentSize' in result) lines.push(`New content size: ${result.newContentSize} characters`);
     if ('anchorIndex' in result) lines.push(`Anchor position: character ${result.anchorIndex}`);
     if ('citeKey' in result) lines.push(`Cite key: ${result.citeKey}`);
