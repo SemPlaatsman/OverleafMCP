@@ -16,3 +16,5 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: node --test test/unit.test.js
+      # Git-touching behaviour against a bare repository on local disk. No network.
+      - run: node --test test/local-repo.test.js
