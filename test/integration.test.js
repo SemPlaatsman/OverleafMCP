@@ -1033,12 +1033,24 @@ describe('Group 7: BibTeX tools', () => {
 
   test('7.11 removeBibEntry: remove last remaining entry "fixture2024" (push:true)', async () => {
     testedTools.add('remove_bib_entry');
-    await withRetry(() =>
-      exClient.removeBibEntry('test_fixture.bib', 'fixture2024', {
-        push: true,
-        commitMessage: 'test 7.11: removeBibEntry fixture2024 (last entry)',
-      })
-    );
+    // A removal cannot simply be retried: if an earlier attempt committed
+    // locally and only its push failed (rate limit), the key is already gone
+    // and a second attempt reports "not found". In that case the retry only
+    // has to deliver the pending commit, which an identical writeFile does.
+    let attempts = 0;
+    await withRetry(async () => {
+      attempts++;
+      try {
+        return await exClient.removeBibEntry('test_fixture.bib', 'fixture2024', {
+          push: true,
+          commitMessage: 'test 7.11: removeBibEntry fixture2024 (last entry)',
+        });
+      } catch (err) {
+        if (attempts === 1 || !/not found/.test(err.message)) throw err;
+        const local = readFileSync(path.join(exClient.localPath, 'test_fixture.bib'), 'utf8');
+        return exClient.writeFile('test_fixture.bib', local.replace(/\r\n/g, '\n'), { push: true });
+      }
+    });
     const content = await withRetry(() => exClient.readFile('test_fixture.bib'));
     assert.ok(!content.includes('fixture2024'), 'fixture2024 should be removed');
     assert.equal(content.trim(), '', 'File should be empty after removing last entry');
