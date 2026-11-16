@@ -211,15 +211,29 @@ describe('Group 2: LaTeX read tools', () => {
     }
   });
 
-  test('2.5 getSection: returns section content for "Alpha" without parentTitle', async () => {
+  test('2.5 getSection: default scope returns the heading and own text of "Alpha", without its subsection', async () => {
     testedTools.add('get_section_content');
     const result = await withRetry(() => exClient.getSection('test_fixture.tex', 'Alpha'));
     assert.notEqual(result, null, 'getSection should return a result for an existing section');
-    const content = typeof result === 'string' ? result : result?.content;
-    assert.ok(
-      content?.includes('Alpha section content.'),
-      `Expected fixture text in result, got: "${content}"`
+    assert.equal(result.scope, 'own');
+    assert.equal(result.content, '\\section{Alpha}\nAlpha section content.');
+  });
+
+  test('2.5b getSection: scope "full" returns "Alpha" with its subsection and stops before "Beta"', async () => {
+    testedTools.add('get_section_content');
+    const result = await withRetry(() =>
+      exClient.getSection('test_fixture.tex', 'Alpha', null, { scope: 'full' })
     );
+    assert.equal(
+      result.content,
+      '\\section{Alpha}\nAlpha section content.\n\n\\subsection{Alpha Sub}\nAlpha subsection content.'
+    );
+  });
+
+  test('2.5c getSection: the last section stops before \\end{document}', async () => {
+    testedTools.add('get_section_content');
+    const result = await withRetry(() => exClient.getSection('test_fixture.tex', 'Beta'));
+    assert.equal(result.content, '\\section{Beta}\nBeta section content.');
   });
 
   test('2.6 getSection: with parentTitle resolves correct subsection in main.tex', async () => {
@@ -377,14 +391,20 @@ describe('Group 4: Write tools — dryRun', () => {
     assert.ok(typeof result.newSize === 'number', 'Expected newSize to be a number');
   });
 
-  test('4.2 writeSection dryRun: existing section "Alpha" returns { dryRun: true, sectionFound: true, newContentSize }', async () => {
+  test('4.2 writeSection dryRun: existing section "Alpha" returns { dryRun, sectionFound, scope, replacedSize, newContentSize }', async () => {
     testedTools.add('write_section');
+    const newContent = '\\section{Alpha}\nNew Alpha content.\n';
     const result = await withRetry(() =>
-      exClient.writeSection('test_fixture.tex', 'Alpha', 'New Alpha content.\n', { dryRun: true })
+      exClient.writeSection('test_fixture.tex', 'Alpha', newContent, { dryRun: true })
     );
-    assert.equal(result.dryRun, true);
-    assert.equal(result.sectionFound, true);
-    assert.ok(typeof result.newContentSize === 'number', 'Expected newContentSize to be a number');
+    assert.deepEqual(result, {
+      dryRun: true,
+      sectionFound: true,
+      scope: 'own',
+      // The text getSection returns for the same section and scope.
+      replacedSize: '\\section{Alpha}\nAlpha section content.'.length,
+      newContentSize: newContent.length,
+    });
   });
 
   test('4.3 writeSection dryRun: nonexistent section throws "Section not found"', async () => {
@@ -555,7 +575,7 @@ describe('Group 5: Write tools — actual writes', () => {
     );
   });
 
-  test('5.3 writeSection: replace "Alpha" section (push:true)', async () => {
+  test('5.3 writeSection: scope "full" replaces "Alpha" together with its subsection (push:true)', async () => {
     testedTools.add('write_section');
     // Restore fixture with push:false — bundled into this test's push:true
     await withRetry(() =>
@@ -564,17 +584,23 @@ describe('Group 5: Write tools — actual writes', () => {
         commitMessage: 'test: restore fixture for 5.3',
       })
     );
-    const newAlpha = 'New Alpha intro.\n\n\\subsection{Alpha Sub}\nNew Alpha sub content.\n';
+    const newAlpha =
+      '\\section{Alpha}\nNew Alpha intro.\n\n\\subsection{Alpha Sub}\nNew Alpha sub content.\n';
     await withRetry(() =>
       exClient.writeSection('test_fixture.tex', 'Alpha', newAlpha, {
+        scope: 'full',
         push: true,
         commitMessage: 'test 5.3: writeSection Alpha replacement',
       })
     );
     const content = await withRetry(() => exClient.readFile('test_fixture.tex'));
-    assert.ok(content.includes('New Alpha intro.'), 'Alpha intro should be replaced');
-    assert.ok(!content.includes('Alpha section content.'), 'Old Alpha content should be gone');
-    assert.ok(content.includes('Beta section content.'), 'Beta should be untouched');
+    assert.equal(
+      content,
+      FIXTURE_TEX
+        .replace('Alpha section content.', 'New Alpha intro.')
+        .replace('Alpha subsection content.', 'New Alpha sub content.'),
+      'Only the text inside Alpha and Alpha Sub should differ from the fixture'
+    );
     const history = await withRetry(() => exClient.listHistory({ limit: 1 }));
     assert.ok(
       history[0].subject.includes('5.3'),
@@ -590,7 +616,7 @@ describe('Group 5: Write tools — actual writes', () => {
       exClient.writeSection(
         'test_fixture.tex',
         'Alpha Sub',
-        'Standalone subsection replacement.\n',
+        '\\subsection{Alpha Sub}\nStandalone subsection replacement.\n',
         {
           push: false,
           commitMessage: 'test 5.4: writeSection Alpha Sub only',
@@ -598,49 +624,69 @@ describe('Group 5: Write tools — actual writes', () => {
       )
     );
     const content = await withRetry(() => exClient.readFile('test_fixture.tex'));
-    assert.ok(
-      content.includes('Standalone subsection replacement.'),
-      'Alpha Sub content should be replaced'
+    assert.equal(
+      content,
+      FIXTURE_TEX
+        .replace('Alpha section content.', 'New Alpha intro.')
+        .replace('Alpha subsection content.', 'Standalone subsection replacement.'),
+      'Only the text of Alpha Sub should differ from the state 5.3 left'
     );
-    assert.ok(
-      content.includes('New Alpha intro.'),
-      'Alpha intro from 5.3 should be untouched'
-    );
-    assert.ok(content.includes('Beta section content.'), 'Beta should be untouched');
   });
 
-  test('5.5 writeSection: level-aware boundary for "Alpha" consumes subsection (push:false)', async () => {
+  test('5.5 writeSection: default scope replaces the own text of "Alpha" and keeps its subsection (push:false)', async () => {
     testedTools.add('write_section');
-    // writeSection replaces FROM the section heading itself. After 5.3, \section{Alpha} was
-    // consumed. Restore the fixture first so \section{Alpha} and \subsection{Alpha Sub} both
-    // exist, then verify that writing 'Alpha' consumes the subsection up to \section{Beta}.
     await withRetry(() =>
       exClient.writeFile('test_fixture.tex', FIXTURE_TEX, {
         push: false,
         commitMessage: 'test: restore fixture for 5.5',
       })
     );
+    // The round trip an agent performs: read the section, edit the text, write it back.
+    const section = await withRetry(() => exClient.getSection('test_fixture.tex', 'Alpha'));
     await withRetry(() =>
       exClient.writeSection(
         'test_fixture.tex',
         'Alpha',
-        'Level-aware replacement, no subsection.\n',
+        section.content.replace('Alpha section content.', 'Own-scope replacement.'),
         {
           push: false,
-          commitMessage: 'test 5.5: writeSection Alpha consumes subsection',
+          commitMessage: 'test 5.5: writeSection Alpha keeps subsection',
         }
       )
     );
     const content = await withRetry(() => exClient.readFile('test_fixture.tex'));
-    assert.ok(
-      content.includes('Level-aware replacement, no subsection.'),
-      'New Alpha content should be present'
+    assert.equal(
+      content,
+      FIXTURE_TEX.replace('Alpha section content.', 'Own-scope replacement.'),
+      'Only the own text of Alpha should differ from the fixture'
     );
-    assert.ok(
-      !content.includes('Alpha subsection content.'),
-      'Alpha Sub content should be consumed'
+  });
+
+  test('5.5b writeSection: scope "full" removes a subsection that newContent leaves out (push:false)', async () => {
+    testedTools.add('write_section');
+    await withRetry(() =>
+      exClient.writeFile('test_fixture.tex', FIXTURE_TEX, {
+        push: false,
+        commitMessage: 'test: restore fixture for 5.5b',
+      })
     );
-    assert.ok(content.includes('Beta section content.'), 'Beta should be untouched');
+    await withRetry(() =>
+      exClient.writeSection(
+        'test_fixture.tex',
+        'Alpha',
+        '\\section{Alpha}\nFull replacement, no subsection.\n',
+        {
+          scope: 'full',
+          push: false,
+          commitMessage: 'test 5.5b: writeSection Alpha consumes subsection',
+        }
+      )
+    );
+    const content = await withRetry(() => exClient.readFile('test_fixture.tex'));
+    assert.ok(content.includes('Full replacement, no subsection.'), 'New Alpha content should be present');
+    assert.ok(!content.includes('\\subsection{Alpha Sub}'), 'Alpha Sub should be removed');
+    assert.ok(content.includes('\\section{Beta}\nBeta section content.'), 'Beta should be untouched');
+    assert.ok(content.trimEnd().endsWith('\\end{document}'), '\\end{document} should be untouched');
   });
 
   test('5.6 strReplace: replace unique string (push:true)', async () => {

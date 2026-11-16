@@ -9,8 +9,9 @@
   },
   "scripts": {
     "start": "node overleaf-mcp-server.js",
-    "test": "node --test test/unit.test.js",
+    "test": "node --test test/unit.test.js test/local-repo.test.js",
     "test:unit": "node --test test/unit.test.js",
+    "test:local": "node --test test/local-repo.test.js",
     "test:integration": "node --test test/integration.test.js"
   },
   "dependencies": {
